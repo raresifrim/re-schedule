@@ -1,124 +1,76 @@
-use solana_runtime::bank::Bank;
-use solana_accounts_db::accounts_hash::AccountsHash;
-use serde::{Serialize,Deserialize};
+use std::collections::VecDeque;
+use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use tracing::info;
-use crate::utils::config::SchedulerType;
-use crate::utils::snapshot::load_bank_from_snapshot;
-use crate::harness::scheduler::scheduler_controller::SchedulerController;
-use crate::harness::consume_worker::ConsumeWorker;
-use std::sync::Arc;
+use crate::harness::scheduler;
+use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
+use crate::harness::scheduler::tx_scheduler::{TxScheduler};
+use crate::harness::tx_executor::TxExecutor;
+use crate::{harness::tx_issuer::TxIssuer};
+use crate::harness::scheduler::scheduler::{Scheduler};
 use crate::utils::config::Config;
-use solana_runtime_transaction::{
-        runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
-};
-use crate::harness::scheduler::scheduler::Scheduler;
-use solana_sdk::transaction::SanitizedTransaction;
-use crate::harness::scheduler::transaction_container::Container;
-use crate::harness::read_and_buffer::TransactionBuffer;
-use crate::harness::scheduler::greedy_scheduler::{GreedyScheduler,GreedySchedulerConfig};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SchedulerHarness<C,S,T> where
-    C: Container<RuntimeTransaction<SanitizedTransaction>>,
-    S: Scheduler<RuntimeTransaction<SanitizedTransaction>>,
-    T: TransactionWithMeta 
+
+#[derive(Debug)]
+pub struct SchedulerHarness<S, Tx>
 {
-    bank: Arc<Bank>,
-    accounts_hash: AccountsHash,
-    tx_reader: TransactionBuffer,
-    scheduler: SchedulerController<C,S>,
-    workers: Vec<ConsumeWorker<T>>
-    bank_thread_hdls: Vec<JoinHandle<()>>
+    config: Config,
+    tx_issuer: TxIssuer<Tx>,
+    tx_scheduler: TxScheduler<S,Tx>,
+    tx_executors: Vec<TxExecutor<Tx>>
 }
 
-impl<C,S,T> SchedulerHarness<C,S,T> where
-    C: Container<RuntimeTransaction<SanitizedTransaction>>,
-    S: Scheduler<RuntimeTransaction<SanitizedTransaction>>,
-    T: TransactionWithMeta 
+impl<S, Tx> SchedulerHarness<S,Tx>  where 
+Tx: TransactionWithMeta + Send + Sync + 'static,
+S: Scheduler<Tx> + Send + Sync + 'static
 {
-    pub fn new_from_config(config: Config) -> anyhow::Result<Self> {
+    pub fn new_from_config(config: Config, scheduler: S) -> anyhow::Result<Self> {
         
         info!("Setting up directories and loading snapshots...");
-        let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
-        let start_accounts_hash = start_bank.get_accounts_hash().context("Failed to get accounts hash")?;
+        //let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
+        //let start_accounts_hash = start_bank.get_accounts_hash().context("Failed to get accounts hash")?;
 
-        //create channels which will be used between scheduler and workers
-        let (consume_work_senders, consume_work_receivers) =
+        //create channels which will be used between scheduler, workers and issuer
+        let (issuer_send_channel, scheduler_receiver_channel) = bounded(config.batch_size as usize * 2);
+    
+        let (schedule_to_execute_send_channels, execute_to_schedule_receive_channels): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..config.num_workers).map(|_| unbounded()).unzip();
-        let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
 
-        //Create the scheduller controller which can instantiate different types of scheduling strategies
-        let scheduler_controller = match config.scheduler_type {
-            SchedulerType::Greedy => {
-                let scheduler = GreedyScheduler::new(
-                    consume_work_senders,
-                    finished_consume_work_receiver,
-                    GreedySchedulerConfig::default(),
-                );
-                SchedulerController::new(start_bank,scheduler)
-            },
-            SchedulerType::PrioGraph => {
-                let scheduler = GreedyScheduler::new(
-                    consume_work_senders,
-                    finished_consume_work_receiver,
-                    GreedySchedulerConfig::default(),
-                );
-                SchedulerController::new(start_bank,scheduler)
-            },
-            SchedulerType::Bloom => {
-                let scheduler = GreedyScheduler::new(
-                    consume_work_senders,
-                    finished_consume_work_receiver,
-                    GreedySchedulerConfig::default(),
-                );
-                SchedulerController::new(start_bank,scheduler)
-            }
-        };
+        let (execute_to_issuer_send_channels, issuer_to_execute_receive_channels): (Vec<Sender<_>>, Vec<Receiver<_>>) =
+            (0..config.num_workers).map(|_| unbounded()).unzip();
 
-        //Create Worker Objects
-        let workers = vec![];
-        for (index, work_receiver) in consume_work_receivers.into_iter().enumerate() {
-            let consume_worker = ConsumeWorker::new(
-                id,
-                work_receiver,
-                Consumer::new(
-                    committer.clone(),
-                    transaction_recorder.clone(),
-                    QosService::new(id),
-                    log_messages_bytes_limit,
-                ),
-                finished_work_sender.clone(),
-                poh_recorder.read().unwrap().new_leader_bank_notifier(),
-            );
-            workers.push(consume_workers);
+        let tx_issuer = TxIssuer::new(issuer_to_execute_receive_channels, issuer_send_channel, VecDeque::new());
+        
+        let tx_scheduler = TxScheduler::new(scheduler, scheduler_receiver_channel, schedule_to_execute_send_channels);
+
+        let mut tx_executors = vec![];
+        for i in 0..config.num_workers {
+            tx_executors.push(TxExecutor::new(
+                execute_to_schedule_receive_channels[i as usize].clone(),
+                execute_to_issuer_send_channels[i as usize].clone()
+            ));
         }
 
-        Self{
-            bank:start_bank,
-            accounts_hash: start_accounts_hash,
-            scheduler: scheduler_controller,
-            bank_thread_hdls:vec![JoinHandle<()>; config.num_workers + 1],
-            workers
-        }
+        Ok(Self{
+            config,
+            tx_issuer,
+            tx_scheduler,
+            tx_executors
+        })
     }
 
 
-    pub fn run(&mut self) {
-        
-        self.bank_thread_hdls.push(
-            std::thread::spawn(move || {
-                match self.scheduler_controller.run() {
-                    Ok(_) => {info!("Scheduler Worker finished!")},
-                    Err() => {info!("Scheduler Worker ended unexpected!")}
-                }
-            })
-        );
-        
-        self.bank_thread_hdls.push(
-            std::thread::spawn(move || {
-                let _ = consume_worker.run();
-            })
-        );
+    pub fn run(self) {
+        let mut harness_hdls = vec![];
+        harness_hdls.push(self.tx_issuer.run());
+        harness_hdls.push(self.tx_scheduler.run());
+        for ex in self.tx_executors {
+            harness_hdls.push(ex.run());
+        }
+
+        for h in harness_hdls {
+            h.join();
+        }
     }
 }
+

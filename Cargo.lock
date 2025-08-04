@@ -4470,6 +4470,7 @@ dependencies = [
  "async-trait",
  "clap 4.5.42",
  "crossbeam-channel",
+ "crossbeam-utils",
  "itertools 0.14.0",
  "reqwest 0.12.22",
  "serde",

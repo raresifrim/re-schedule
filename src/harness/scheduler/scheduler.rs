@@ -1,8 +1,22 @@
-use crate::harness::scheduler::transaction_container::Container;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use crate::harness::scheduler::scheduling_common::SchedulingCommon;
 use thiserror::Error;
-use std::sync::{Arc,Mutex};
+use crossbeam_channel::{Receiver,Sender};
+
+//TODO move these structures in a common place
+
+//we should be able to send and receive either one or more txs at once
+#[derive(Debug, Clone)]
+pub enum WorkEntry<Tx> {
+    SingleTx(Tx),
+    MultipleTxs(Vec<Tx>)
+}
+
+/// Message: [Issuer -> Scheduler]
+/// Message: [Scheduler -> Executor]
+#[derive(Debug, Clone)]
+pub struct Work<Tx> {
+    pub entry: WorkEntry<Tx>,
+}
 
 #[derive(Debug, Error)]
 pub enum SchedulerError {
@@ -22,37 +36,27 @@ pub struct SchedulingSummary {
     pub num_unschedulable_threads: usize,
 }
 
-pub trait Scheduler<Tx: TransactionWithMeta> {
-    /// Schedule transactions from `container`.
-    /// pre-graph and pre-lock filters may be passed to be applied
-    /// before specific actions internally.
-    fn schedule<C:Container<Tx>>(
-        &mut self,
-        container: &Arc<Mutex<C>>,
-        //TODO
-        //pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
-        //pre_lock_filter: impl Fn(&TransactionState<Tx>) -> PreLockFilterAction,
-    ) -> Result<SchedulingSummary, SchedulerError>;
+pub trait Scheduler<Tx: TransactionWithMeta + Send + Sync + 'static> {
 
-    /// Receive completed batches of transactions without blocking.
-    /// Returns (num_transactions, num_retryable_transactions) on success.
-    fn receive_completed<C:Container<Tx>>(
+    /// basic scheduler function that should:
+    /// 1. pull data from the work issuer channel
+    /// 2. schedule it as single or list of txs
+    /// 3. send it to the appropriate worker channels available
+    fn schedule(
         &mut self,
-        container: &mut Arc<Mutex<C>>,
-    ) -> anyhow::Result<()> {
-        loop {
-            let num_transactions = self
-                .scheduling_common_mut()
-                .try_receive_completed(container)?;
-            if num_transactions == 0 {
-                break;
-            }
-        }
+        issue_channel: &Receiver<Work<Tx>>,
+        execution_channels: &Vec<Sender<Work<Tx>>>
+    ) -> Result<SchedulingSummary, SchedulerError>{
         
-        Ok(())
+        //for now just echo the txs to first worker
+        let tx = issue_channel.recv().unwrap();
+        execution_channels[0].send(tx);
+       
+        Ok(SchedulingSummary{
+            num_scheduled:0,
+            num_unschedulable_conflicts:0,
+            num_unschedulable_threads:0
+        })
     }
 
-    /// All schedulers should have access to the common context for shared
-    /// implementation.
-    fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx>;
 }

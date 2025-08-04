@@ -1,11 +1,16 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_sdk::transaction::SanitizedTransaction;
+use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::utils::config::Config;
 use std::{path::PathBuf};
-use tokio::{time::Instant};
+use crate::harness::scheduler_harness::SchedulerHarness;
 use tracing::{info, instrument};
 use crate::utils::config::SchedulerType;
 use crate::utils::config::NetworkType;
+use crate::harness::scheduler::scheduler::Scheduler;
 
 
 #[derive(Parser, Debug)]
@@ -31,7 +36,11 @@ pub struct RescheduleArgs {
 
     /// Slot allowed time in ms
     #[arg(long,default_value = "400")]
-    pub slot_duration:Option<u64>
+    pub slot_duration:Option<u64>,
+
+    /// Number of thread workers
+    #[arg(long,default_value = "4")]
+    pub num_workers:Option<u64>
 }
 
 #[instrument(name = "run_schedule")]
@@ -45,13 +54,27 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         args.scheduler_type.unwrap(),
         args.transactions,
         args.batch_size,
-        args.slot_duration
+        args.slot_duration,
+        args.num_workers
     )
     .await
     .context("Failed to load configuration")?;
 
     info!(?config, "Loaded configuration for replay");
-    let scheduler_harness = SchedulerHarness::new_from_config(config);
+    let scheduler_harness = match config.scheduler_type {
+        SchedulerType::Bloom => {
+            let scheduler = BloomScheduler;
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+        }
+        SchedulerType::Greedy => {
+            let scheduler = BloomScheduler;
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+        },
+        SchedulerType::PrioGraph => {
+            let scheduler = BloomScheduler;
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+        }
+    };
     
     
     /* info!(
