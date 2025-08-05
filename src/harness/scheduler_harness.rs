@@ -4,24 +4,23 @@ use crate::harness::scheduler::tx_scheduler::{TxScheduler};
 use crate::harness::tx_executor::TxExecutor;
 use crate::{harness::tx_issuer::TxIssuer};
 use crate::harness::scheduler::scheduler::{Scheduler};
-use crate::utils::config::{Config, NetworkType};
+use crate::utils::config::Config;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use crate::utils::snapshot::load_bank_from_snapshot;
 
 #[derive(Debug)]
-pub struct SchedulerHarness<S, Tx>
+pub struct SchedulerHarness<S> where S:Scheduler
 {
     config: Config,
-    tx_issuer: TxIssuer<Tx>,
-    tx_scheduler: TxScheduler<S,Tx>,
-    tx_executors: Vec<TxExecutor<Tx>>
+    tx_issuer: TxIssuer<S::Tx>,
+    tx_scheduler: TxScheduler<S>,
+    tx_executors: Vec<TxExecutor<S::Tx>>
 }
 
-impl<S, Tx> SchedulerHarness<S,Tx>  where 
-Tx: Send + Sync + 'static,
-S: Scheduler<Tx> + Send + Sync + 'static
+impl<S> SchedulerHarness<S>  where 
+S: Scheduler + Send + Sync + 'static
 {
-    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<Tx>) -> anyhow::Result<Self> {
+    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<S::Tx>) -> anyhow::Result<Self> {
         
         info!("Setting up directories and loading snapshots...");
         //let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;

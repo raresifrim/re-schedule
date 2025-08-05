@@ -1,9 +1,9 @@
 use thiserror::Error;
 use crossbeam_channel::{Receiver,Sender};
 
-//TODO move these structures in a common place
+// TODO: move these structures in a common place
 
-//we should be able to send and receive either one or more txs at once
+// we should be able to send and receive either one or more txs at once
 #[derive(Debug, Clone)]
 pub enum WorkEntry<Tx> {
     SingleTx(Tx),
@@ -35,16 +35,16 @@ pub struct SchedulingSummary {
     pub num_unschedulable_threads: usize,
 }
 
-pub trait Scheduler<Tx: Send + Sync + 'static> {
-
+pub trait Scheduler {
+    type Tx: Send + Sync + 'static;
     /// basic scheduler function that should:
     /// 1. pull data from the work issuer channel
     /// 2. schedule it as single or list of txs
     /// 3. send it to the appropriate worker channels available
     fn schedule(
         &mut self,
-        issue_channel: &Receiver<Work<Tx>>,
-        execution_channels: &Vec<Sender<Work<Tx>>>
+        issue_channel: &Receiver<Work<Self::Tx>>,
+        execution_channels: &[Sender<Work<Self::Tx>>]
     ) -> Result<SchedulingSummary, SchedulerError>{
         
         //for now just echo the txs to first worker

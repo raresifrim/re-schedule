@@ -1,6 +1,11 @@
+use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+use solana_sdk::transaction::SanitizedVersionedTransaction;
+
 use crate::harness::scheduler::scheduler::Scheduler;
 
 #[derive(Debug)]
 pub struct BloomScheduler;
 
-impl<Tx: Send + Sync + 'static> Scheduler<Tx> for BloomScheduler {}
+impl Scheduler for BloomScheduler {
+    type Tx = RuntimeTransaction<SanitizedVersionedTransaction>;
+}

@@ -16,7 +16,7 @@ use tracing::{info, instrument};
 #[derive(Parser, Debug)]
 pub struct DownloadSingleSnapshotArgs {
     /// Network type to download snapshot for
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, default_value = "mainnet")]
     pub network: NetworkType,
 
     /// Path to the configuration file (to read RPC URL)
@@ -27,7 +27,7 @@ pub struct DownloadSingleSnapshotArgs {
 #[derive(Parser, Debug)]
 pub struct DownloadBlocksArgs {
     /// Network type to download snapshot for
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, default_value = "mainnet")]
     pub network: NetworkType,
 
     /// Path to the configuration file (to read RPC URL)
@@ -35,7 +35,7 @@ pub struct DownloadBlocksArgs {
     pub config_path: PathBuf,
 
     /// Number of blocks to retrieve
-    #[arg(short, long)]
+    #[arg(short, long, default_value="10")]
     pub blocks: u64
 }
 
@@ -91,7 +91,7 @@ pub async fn run (args: DownloadBlocksArgs) -> Result<usize>{
  
     info!(args = ?args, "Extracting txs from downloaded blocks");
     let (txs_info, txs_num) = solana_client.extract_transactions(&args.network, &blocks_info).await?;
-    info!(txs_info = ?txs_info, "Successfully extracted {} nonvoting transactions.", txs_num);
+    info!(txs_info = ?txs_info, "Successfully extracted {} transactions.", txs_num);
     
     Ok(txs_num)
 }

@@ -19,7 +19,7 @@ use base64::{engine::general_purpose, Engine as _};
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
     /// Network type to replay (e.g., devnet, testnet)
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, default_value = "mainnet")]
     pub network: NetworkType,
 
     /// Path to the configuration file
@@ -31,7 +31,7 @@ pub struct RescheduleArgs {
     pub transactions: Option<u64>,
 
     /// Scheduler type
-    #[arg(long, value_enum, default_value = "greedy")]
+    #[arg(long, value_enum, default_value = "bloom")]
     pub scheduler_type: Option<SchedulerType>,
 
     /// Scheduler transaction batch size 
@@ -50,9 +50,9 @@ pub struct RescheduleArgs {
 #[instrument(name = "run_schedule")]
 pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     
-    info!(args = ?args, "Starting replay");
+    info!("Starting replay");
     // Load config
-    let config = Config::load_from_json(
+    let mut config = Config::load_from_json(
         &args.config_path,
         args.network,
         args.scheduler_type.unwrap(),
@@ -66,21 +66,29 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     info!("Loaded configuration for replay");
     
     info!("Loading transactions from local file");
-    let transactions = load_transactions(config.network_type).unwrap();
+    let transactions = load_transactions(
+        config.network_type, 
+        config.num_txs_to_process
+    ).unwrap();
     info!("Loaded {} execution transactions from local file", transactions.len());
 
     let scheduler_harness = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
+            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
         }
         SchedulerType::Greedy => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
+            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
         },
         SchedulerType::PrioGraph => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
+            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
+        },
+        SchedulerType::Sequential => {
+            let scheduler = BloomScheduler;
+            config.num_workers = 1; //in sequential mode we only use one worker for executing txs
+            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
         }
     };
     info!("Initialized scheduler harness");
@@ -109,7 +117,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
 }
 
-fn load_transactions(network_type: NetworkType) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedVersionedTransaction>>> {
+fn load_transactions(network_type: NetworkType, num_txs: u64) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedVersionedTransaction>>> {
         let mut transactions = VecDeque::<RuntimeTransaction<SanitizedVersionedTransaction>>::new();
 
         let network_key = network_type.to_string();
@@ -128,6 +136,14 @@ fn load_transactions(network_type: NetworkType) -> anyhow::Result<VecDeque<Runti
             tx
         }).collect(); 
 
+        if versioned_txs.len() == 0 {
+            panic!("No txs found to be replayed and rescheduled, aborting run...");
+        }
+
+        let mut counter:u64 = 0;
+        //txs cannot be cloned/copied so we need the iterator to consume it and move it permanenty
+        //thus we cannot use the counter directly in the loop and also to reference inside the cevtor
+        //so we have to increment the above counter variable and break the loop once we reached our goal
         for tx in versioned_txs {
             let message_hash = tx.verify_and_hash_message()?;
             let runtime_tx = RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
@@ -138,6 +154,15 @@ fn load_transactions(network_type: NetworkType) -> anyhow::Result<VecDeque<Runti
             if !runtime_tx.is_simple_vote_transaction() {
                 transactions.push_back(runtime_tx);
             }
+
+            counter += 1;
+            if counter == num_txs {
+                break;
+            }
+        }
+
+        if counter < num_txs {
+            info!("Found less non-voting txs in the provided blocks than requested.");
         }
 
         Ok(transactions)

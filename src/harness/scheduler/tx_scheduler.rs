@@ -4,23 +4,22 @@ use crate::harness::scheduler::scheduler::{Scheduler, Work};
 use tracing::info;
 
 #[derive(Debug)]
-pub struct TxScheduler<S, Tx> {
+pub struct TxScheduler<S> where S: Scheduler {
     /// scheduler strategy used for the tx scheduler
     scheduler: S,
     /// channel connected to the tx issuer 
-    work_issuer: Receiver<Work<Tx>>,
+    work_issuer: Receiver<Work<S::Tx>>,
     /// channel connected to the tx executors
-    work_executors: Vec<Sender<Work<Tx>>>,
+    work_executors: Vec<Sender<Work<S::Tx>>>,
 }
 
-impl<S, Tx> TxScheduler<S, Tx> where 
-    S: Scheduler<Tx> + Send + Sync + 'static,
-    Tx:  Send + Sync + 'static
+impl<S> TxScheduler<S> where 
+    S: Scheduler + Send + Sync + 'static,
 {
      pub fn new(
         scheduler: S,
-        work_issuer: Receiver<Work<Tx>>,
-        work_executors: Vec<Sender<Work<Tx>>>,
+        work_issuer: Receiver<Work<S::Tx>>,
+        work_executors: Vec<Sender<Work<S::Tx>>>,
     ) -> Self {
         Self { scheduler, work_issuer, work_executors}
     }

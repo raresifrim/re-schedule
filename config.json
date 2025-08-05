@@ -1,1 +1,44 @@
-{"networks":{"devnet":{"batch_size":64,"genesis_folder":"devnet","num_blocks":10,"num_txs":10,"num_workers":2,"rpc_url":"https://devnet.dev2.eclipsenetwork.xyz","slot_duration":400,"start_snapshot":"snapshot-55044012-2vNb7P6zEfx8s91Yekrbc6xbGNFEzgdah4APe8wcjdMw.tar.zst"},"localnet":{"batch_size":64,"genesis_folder":"localnet","num_blocks":10,"num_txs":10,"num_workers":2,"rpc_url":"http://127.0.0.1:8899","slot_duration":400,"start_snapshot":"snapshot-1600-3wXBBH7WeYmXM6brGMDiNVCHXhJ2yLYf4uzHYkSKY52v.tar.zst"},"mainnet":{"batch_size":64,"genesis_folder":"mainnet","num_blocks":50,"num_txs":228,"num_workers":2,"rpc_url":"https://mainnetbeta-rpc.eclipse.xyz","slot_duration":400,"start_snapshot":"snapshot-88795797-HYAua3SJ8XVAFheZ18dY9TFPkvQNfDZMSgPjbZrmsrvC.tar.zst"},"testnet":{"batch_size":64,"genesis_folder":"testnet","num_blocks":10,"num_txs":10,"num_workers":2,"rpc_url":"https://testnet.dev2.eclipsenetwork.xyz","slot_duration":400,"start_snapshot":"snapshot-81020073-BTQQKRH28GiiP6te6J6bEm7xMogWg5SBN2zUR5LuKQxb.tar.zst"}}}
+{
+    "networks": {
+        "devnet": {
+            "batch_size": 64,
+            "genesis_folder": "devnet",
+            "num_blocks": 10,
+            "num_txs": 10,
+            "num_workers": 2,
+            "rpc_url": "https://devnet.dev2.eclipsenetwork.xyz",
+            "slot_duration": 400,
+            "start_snapshot": "snapshot-55044012-2vNb7P6zEfx8s91Yekrbc6xbGNFEzgdah4APe8wcjdMw.tar.zst"
+        },
+        "localnet": {
+            "batch_size": 64,
+            "genesis_folder": "localnet",
+            "num_blocks": 10,
+            "num_txs": 10,
+            "num_workers": 2,
+            "rpc_url": "http://127.0.0.1:8899",
+            "slot_duration": 400,
+            "start_snapshot": "snapshot-1600-3wXBBH7WeYmXM6brGMDiNVCHXhJ2yLYf4uzHYkSKY52v.tar.zst"
+        },
+        "mainnet": {
+            "batch_size": 64,
+            "genesis_folder": "mainnet",
+            "num_blocks": 50,
+            "num_txs": 236,
+            "num_workers": 2,
+            "rpc_url": "https://mainnetbeta-rpc.eclipse.xyz",
+            "slot_duration": 400,
+            "start_snapshot": "snapshot-89345797-E8RxVrasiVfgM38e8kL7PmPbPs5b2gQoKRrciWnKeon1.tar.zst"
+        },
+        "testnet": {
+            "batch_size": 64,
+            "genesis_folder": "testnet",
+            "num_blocks": 10,
+            "num_txs": 10,
+            "num_workers": 2,
+            "rpc_url": "https://testnet.dev2.eclipsenetwork.xyz",
+            "slot_duration": 400,
+            "start_snapshot": "snapshot-81020073-BTQQKRH28GiiP6te6J6bEm7xMogWg5SBN2zUR5LuKQxb.tar.zst"
+        }
+    }
+}

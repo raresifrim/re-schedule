@@ -46,11 +46,12 @@ pub fn upload_json_config(path: &str, json_config: JsonConfig) -> anyhow::Result
 }
 
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash, ValueEnum, Display)]
+#[derive(Default, Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash, ValueEnum, Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum NetworkType {
     Devnet,
     Testnet,
+    #[default]
     Mainnet,
     Localnet,
 }
@@ -63,7 +64,8 @@ pub enum NetworkType {
 pub enum SchedulerType {
     Greedy,
     PrioGraph,
-    Bloom
+    Bloom,
+    Sequential
 }
 
 // New struct to represent a snapshot with its directories
