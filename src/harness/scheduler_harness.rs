@@ -39,7 +39,8 @@ S: Scheduler<Tx> + Send + Sync + 'static
         let (execute_to_issuer_send_channels, issuer_to_execute_receive_channels): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..config.num_workers).map(|_| unbounded()).unzip();
 
-        let tx_issuer = TxIssuer::new(issuer_to_execute_receive_channels, issuer_send_channel, VecDeque::new());
+        let transactions = VecDeque::<Tx>::new();
+        let tx_issuer = TxIssuer::new(issuer_to_execute_receive_channels, issuer_send_channel, transactions);
         
         let tx_scheduler = TxScheduler::new(scheduler, scheduler_receiver_channel, schedule_to_execute_send_channels);
 

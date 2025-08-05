@@ -1,3 +1,4 @@
+use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use std::collections::VecDeque;
@@ -90,7 +91,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             //channel must bounded, so that once filled, the Tx issuer is free to do other work
             while !self.work_sender.is_full() {
                 //get front tx but do not consume it as we might not be able to send it
-                let maybe_tx = self.transactions.front();
+                let maybe_tx = self.transactions.pop_front();
                 if maybe_tx.is_none() {
                     //nothing to send
                     //maybe we will receive something from the workers
@@ -100,8 +101,36 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 match self.work_sender.try_send(Work {
                     entry: WorkEntry::SingleTx(tx),
                 }) {
-                    Ok(_) => _ = self.transactions.pop_front(), //consume tx from queue
-                    Err(_) => info!("Could not send the current tx, maybe channel is full?"), //lets try next time
+                    Ok(_) => info!("Successfully issued another tx to the scheduler"), //consume tx from queue
+                    Err(e) => {
+                        match e {
+                            //regardless of dailer we should push back our txs
+                            TrySendError::Full(tx) =>{
+                                match tx.entry {
+                                    WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
+                                    WorkEntry::MultipleTxs(mut txs) => {
+                                        while !txs.is_empty() {
+                                            self.transactions.push_front(txs.pop().unwrap());
+                                        }
+                                    }
+                                };
+                                info!("Scheduler channel is full, trying again later...");
+                                break;
+                            },
+                            TrySendError::Disconnected(tx) => {
+                                match tx.entry {
+                                    WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
+                                    WorkEntry::MultipleTxs(mut txs) => {
+                                        while !txs.is_empty() {
+                                            self.transactions.push_front(txs.pop().unwrap());
+                                        }
+                                    }
+                                };
+                                info!("Scheduler channel got disconnected, ending issuer as well");
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }

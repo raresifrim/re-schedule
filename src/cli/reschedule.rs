@@ -59,8 +59,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     )
     .await
     .context("Failed to load configuration")?;
-
     info!(?config, "Loaded configuration for replay");
+    
     let scheduler_harness = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler = BloomScheduler;
@@ -75,7 +75,11 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
         }
     };
+    info!("Initialized scheduler harness");
     
+    info!("Starting scheduler harness");
+    scheduler_harness.run();
+    info!("Finalized scheduler harness");
     
     /* info!(
         total_duration_ms = overall_duration.as_millis(),
