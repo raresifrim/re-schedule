@@ -109,7 +109,7 @@ impl Snapshot {
 pub struct Config {
     // Snapshot configuration
     pub start_snapshot: Snapshot,
-
+    pub network_type: NetworkType,
     // Genesis configuration
     pub genesis: GenesisConfig,
 
@@ -175,6 +175,7 @@ impl Config {
         let num_workers = cli_num_workers.or(Some(network_config.num_workers)).unwrap();
         Ok(Self {
             start_snapshot,
+            network_type,
             genesis,
             scheduler_type,
             num_txs_to_process,

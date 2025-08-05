@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use solana_sdk::transaction::SanitizedTransaction;
+use solana_runtime_transaction::transaction_meta::StaticMeta;
+use solana_sdk::transaction::SanitizedVersionedTransaction;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::utils::config::Config;
 use std::{path::PathBuf};
@@ -10,8 +10,11 @@ use crate::harness::scheduler_harness::SchedulerHarness;
 use tracing::{info, instrument};
 use crate::utils::config::SchedulerType;
 use crate::utils::config::NetworkType;
-use crate::harness::scheduler::scheduler::Scheduler;
-
+use solana_sdk::transaction::VersionedTransaction;
+use std::collections::VecDeque;
+use std::fs;
+use std::io;
+use base64::{engine::general_purpose, Engine as _};
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -24,6 +27,7 @@ pub struct RescheduleArgs {
     pub config_path: PathBuf,
 
     /// Number of txs to process (optional, overrides config default)
+    #[arg(short, long)]
     pub transactions: Option<u64>,
 
     /// Scheduler type
@@ -59,20 +63,24 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     )
     .await
     .context("Failed to load configuration")?;
-    info!(?config, "Loaded configuration for replay");
+    info!("Loaded configuration for replay");
     
+    info!("Loading transactions from local file");
+    let transactions = load_transactions(config.network_type).unwrap();
+    info!("Loaded {} execution transactions from local file", transactions.len());
+
     let scheduler_harness = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
         }
         SchedulerType::Greedy => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
         },
         SchedulerType::PrioGraph => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedTransaction>>::new_from_config(config, scheduler).unwrap()
+            SchedulerHarness::<BloomScheduler,RuntimeTransaction<SanitizedVersionedTransaction>>::new_from_config(config, scheduler, transactions)?
         }
     };
     info!("Initialized scheduler harness");
@@ -99,4 +107,38 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
     Ok(())
 
+}
+
+fn load_transactions(network_type: NetworkType) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedVersionedTransaction>>> {
+        let mut transactions = VecDeque::<RuntimeTransaction<SanitizedVersionedTransaction>>::new();
+
+        let network_key = network_type.to_string();
+        let cache_dir = PathBuf::from("./cache");
+        let snapshot_dir = cache_dir.join(format!("snapshots-{}", network_key));
+        fs::exists(&snapshot_dir).context("Failed to get snapshot directory")?;
+        let txs_path = snapshot_dir.join("transactions.json");
+
+        let file = fs::File::open(txs_path).context(format!("Failed to open tx json file"))?;
+        let reader = io::BufReader::new(file);
+        let base64_str: Vec<Vec<String>> = serde_json::from_reader(reader).context("Failed to parse tx json file")?;
+        let base64_str: Vec<String> = base64_str.iter().map(|v| v[0].clone()).collect();
+        let versioned_txs: Vec<VersionedTransaction> = base64_str.iter().map(|v| {
+            let tx_bytes = general_purpose::STANDARD.decode(&v).expect("Failed to decode base64 encoded tx");
+            let tx = bincode::deserialize::<VersionedTransaction>(&tx_bytes).expect("Failed to deserialize tx");
+            tx
+        }).collect(); 
+
+        for tx in versioned_txs {
+            let message_hash = tx.verify_and_hash_message()?;
+            let runtime_tx = RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
+                SanitizedVersionedTransaction::try_from(tx)?,
+                solana_sdk::transaction::MessageHash::Precomputed(message_hash),
+                None
+            )?;
+            if !runtime_tx.is_simple_vote_transaction() {
+                transactions.push_back(runtime_tx);
+            }
+        }
+
+        Ok(transactions)
 }

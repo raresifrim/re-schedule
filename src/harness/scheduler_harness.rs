@@ -1,15 +1,12 @@
 use std::collections::VecDeque;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use tracing::info;
-use crate::harness::scheduler;
-use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::tx_scheduler::{TxScheduler};
 use crate::harness::tx_executor::TxExecutor;
 use crate::{harness::tx_issuer::TxIssuer};
 use crate::harness::scheduler::scheduler::{Scheduler};
-use crate::utils::config::Config;
+use crate::utils::config::{Config, NetworkType};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-
+use crate::utils::snapshot::load_bank_from_snapshot;
 
 #[derive(Debug)]
 pub struct SchedulerHarness<S, Tx>
@@ -21,10 +18,10 @@ pub struct SchedulerHarness<S, Tx>
 }
 
 impl<S, Tx> SchedulerHarness<S,Tx>  where 
-Tx: TransactionWithMeta + Send + Sync + 'static,
+Tx: Send + Sync + 'static,
 S: Scheduler<Tx> + Send + Sync + 'static
 {
-    pub fn new_from_config(config: Config, scheduler: S) -> anyhow::Result<Self> {
+    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<Tx>) -> anyhow::Result<Self> {
         
         info!("Setting up directories and loading snapshots...");
         //let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
@@ -39,7 +36,6 @@ S: Scheduler<Tx> + Send + Sync + 'static
         let (execute_to_issuer_send_channels, issuer_to_execute_receive_channels): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..config.num_workers).map(|_| unbounded()).unzip();
 
-        let transactions = VecDeque::<Tx>::new();
         let tx_issuer = TxIssuer::new(issuer_to_execute_receive_channels, issuer_send_channel, transactions);
         
         let tx_scheduler = TxScheduler::new(scheduler, scheduler_receiver_channel, schedule_to_execute_send_channels);
@@ -70,7 +66,7 @@ S: Scheduler<Tx> + Send + Sync + 'static
         }
 
         for h in harness_hdls {
-            h.join();
+            h.join().unwrap();
         }
     }
 }

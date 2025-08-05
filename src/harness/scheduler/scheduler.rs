@@ -1,4 +1,3 @@
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use thiserror::Error;
 use crossbeam_channel::{Receiver,Sender};
 
@@ -36,7 +35,7 @@ pub struct SchedulingSummary {
     pub num_unschedulable_threads: usize,
 }
 
-pub trait Scheduler<Tx: TransactionWithMeta + Send + Sync + 'static> {
+pub trait Scheduler<Tx: Send + Sync + 'static> {
 
     /// basic scheduler function that should:
     /// 1. pull data from the work issuer channel

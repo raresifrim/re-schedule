@@ -4468,6 +4468,8 @@ dependencies = [
  "ahash 0.8.12",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
+ "bincode",
  "clap 4.5.42",
  "crossbeam-channel",
  "crossbeam-utils",

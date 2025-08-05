@@ -48,7 +48,7 @@ impl CustomClientTrait for SolanaClient {
     ) -> anyhow::Result<RpcBlock> {
     
         let config = solana_client::rpc_config::RpcBlockConfig {
-            encoding: UiTransactionEncoding::Json.into(),
+            encoding: UiTransactionEncoding::Base64.into(),
             transaction_details: TransactionDetails::Full.into(),
             rewards: None,
             commitment: CommitmentConfig::finalized().into(),
@@ -243,16 +243,17 @@ impl CustomClientTrait for SolanaClient {
             let block = self.get_block(id).await.unwrap();
             for tx in block.transactions.unwrap() {
                 if !tx.meta.as_ref().unwrap().err.is_some() {
-                    let object = serde_json::to_value(tx.transaction.clone()).unwrap();
-                    let message = object.get("message").unwrap();
-                    let instructions = message.get("instructions").unwrap();
-                    let account_keys = message.get("accountKeys").unwrap().as_array().unwrap();
-                    let program_index = instructions[0].get("programIdIndex").unwrap().as_u64().unwrap();
-                    let program_address = account_keys[program_index as usize].as_str().unwrap();
-                    if program_address != "Vote111111111111111111111111111111111111111" {
+                    //let object = serde_json::to_value(tx.transaction.clone()).unwrap();
+                    //let message = object.get("message").unwrap();
+                    //let instructions = message.get("instructions").unwrap();
+                    //let account_keys = message.get("accountKeys").unwrap().as_array().unwrap();
+                    //info!("{:?}", instructions);
+                    //let program_index = instructions[0].get("programId").unwrap().as_str().unwrap();
+                    //let program_address = account_keys[program_index as usize].as_str().unwrap();
+                    //if program_index != "Vote111111111111111111111111111111111111111" {
                         //only save non-voting txs
-                        transactions.push(tx);
-                    }
+                    transactions.push(tx.transaction);
+                   // }
                 }
             }
         }

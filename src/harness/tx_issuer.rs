@@ -1,6 +1,5 @@
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use std::collections::VecDeque;
 use tracing::info;
 use crate::harness::scheduler::scheduler::Work;
@@ -16,7 +15,7 @@ pub struct TxIssuer<Tx> {
 }
 
 impl<Tx> TxIssuer<Tx> 
-where Tx: TransactionWithMeta + Send + Sync + 'static {
+where Tx: Send + Sync + 'static {
     pub fn new(
         completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
         work_sender: Sender<Work<Tx>>,
@@ -56,10 +55,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
-                                info!(
-                                    "Received completed txs: {:?}",
-                                    finished_work.completed_entry.unwrap()
-                                );
+                                info!("Received some completed txs");
                             }
 
                             if finished_work.failed_entry.is_some() {
@@ -84,7 +80,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
 
             if self.transactions.is_empty() {
                 //no more txs to issue
-                continue;
+                break;
             }
 
             //send available txs

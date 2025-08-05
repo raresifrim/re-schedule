@@ -1,5 +1,5 @@
 use crossbeam_channel::{Receiver,Sender};
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use tracing::info;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::Work;
 
@@ -18,7 +18,7 @@ pub struct TxExecutor<Tx> {
 }
 
 impl<Tx> TxExecutor<Tx>
-where Tx: TransactionWithMeta + Send + Sync + 'static {
+where Tx: Send + Sync + 'static {
     pub fn new(
         work_receiver: Receiver<Work<Tx>>,
         completed_work_sender: Sender<FinishedWork<Tx>>,
@@ -46,6 +46,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 // kill this worker if finished_work channel is broken
                 break;
             } 
+            info!("Tx Executed successfuly");
         }
     }
 }

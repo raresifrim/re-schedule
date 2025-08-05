@@ -15,7 +15,7 @@ pub struct TxScheduler<S, Tx> {
 
 impl<S, Tx> TxScheduler<S, Tx> where 
     S: Scheduler<Tx> + Send + Sync + 'static,
-    Tx: TransactionWithMeta + Send + Sync + 'static
+    Tx:  Send + Sync + 'static
 {
      pub fn new(
         scheduler: S,
@@ -35,6 +35,8 @@ impl<S, Tx> TxScheduler<S, Tx> where
                 );
                 match schedule_resp {
                     Err(e) => {
+                        //scheduler should return errors such as channels disconnected
+                        //in which case we should end its execution
                         info!("Received following error from scheduler {:?}", e);
                         break;
                     }
