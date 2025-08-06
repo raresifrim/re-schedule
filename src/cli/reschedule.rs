@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
@@ -15,6 +16,17 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use base64::{engine::general_purpose, Engine as _};
+use solana_sdk::transaction::SanitizedTransaction;
+use solana_svm_transaction::message_address_table_lookup::SVMMessageAddressTableLookup;
+use std::collections::HashSet;
+use solana_sdk::transaction::SimpleAddressLoader;
+use solana_sdk::pubkey::Pubkey;
+use solana_runtime::bank::Bank;
+use solana_sdk::slot_history::Slot;
+use solana_sdk::transaction::AddressLoaderError;
+use solana_message::v0::LoadedAddresses;
+use std::sync::Arc;
+use crate::utils::snapshot::load_bank_from_snapshot;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -65,13 +77,20 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     .context("Failed to load configuration")?;
     info!("Loaded configuration for replay");
     
+    info!("Setting up directories and loading snapshots...");
+    let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
+    //let start_accounts_hash = start_bank.get_accounts_hash().context("Failed to get accounts hash")?;
+    info!("Completed setting up directories and loading snapshots...");
+
     info!("Loading transactions from local file");
     let transactions = load_transactions(
+        start_bank,
         config.network_type, 
         config.num_txs_to_process
     ).unwrap();
     info!("Loaded {} execution transactions from local file", transactions.len());
-
+    
+    info!("Initializing scheduler harness");
     let scheduler_harness = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler = BloomScheduler;
@@ -117,8 +136,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
 }
 
-fn load_transactions(network_type: NetworkType, num_txs: u64) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedVersionedTransaction>>> {
-        let mut transactions = VecDeque::<RuntimeTransaction<SanitizedVersionedTransaction>>::new();
+fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u64) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedTransaction>>> {
+        let mut transactions = VecDeque::<RuntimeTransaction<SanitizedTransaction>>::new();
 
         let network_key = network_type.to_string();
         let cache_dir = PathBuf::from("./cache");
@@ -152,7 +171,12 @@ fn load_transactions(network_type: NetworkType, num_txs: u64) -> anyhow::Result<
                 None
             )?;
             if !runtime_tx.is_simple_vote_transaction() {
-                transactions.push_back(runtime_tx);
+                let final_tx = build_sanitized_transaction(
+                        runtime_tx,
+                        root_bank.as_ref(),
+                        root_bank.get_reserved_account_keys(),
+                )?;
+                transactions.push_back(final_tx);
             }
 
             counter += 1;
@@ -167,3 +191,38 @@ fn load_transactions(network_type: NetworkType, num_txs: u64) -> anyhow::Result<
 
         Ok(transactions)
 }
+
+
+ pub fn build_sanitized_transaction(
+        tx: RuntimeTransaction<SanitizedVersionedTransaction>,
+        bank: &Bank,
+        reserved_account_keys: &HashSet<Pubkey>,
+    ) -> anyhow::Result<RuntimeTransaction<SanitizedTransaction>> {
+       
+        // Resolve the lookup addresses and retrieve the min deactivation slot
+        let (loaded_addresses, _) = resolve_addresses_with_deactivation(&tx, bank)?;
+        let address_loader = SimpleAddressLoader::Enabled(loaded_addresses);
+        let tx = 
+            RuntimeTransaction::<SanitizedTransaction>::try_from(
+                tx,
+                address_loader,
+                reserved_account_keys,
+            )?;
+        Ok(tx)
+    }
+
+    fn resolve_addresses_with_deactivation(
+        transaction: &SanitizedVersionedTransaction,
+        bank: &Bank,
+    ) -> Result<(LoadedAddresses, Slot), AddressLoaderError> {
+        let Some(address_table_lookups) = transaction.get_message().message.address_table_lookups()
+        else {
+            return Ok((LoadedAddresses::default(), Slot::MAX));
+        };
+
+        bank.load_addresses_from_ref(
+            address_table_lookups
+                .iter()
+                .map(SVMMessageAddressTableLookup::from),
+        )
+    }

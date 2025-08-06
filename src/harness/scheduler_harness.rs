@@ -22,10 +22,6 @@ S: Scheduler + Send + Sync + 'static
 {
     pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<S::Tx>) -> anyhow::Result<Self> {
         
-        info!("Setting up directories and loading snapshots...");
-        //let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
-        //let start_accounts_hash = start_bank.get_accounts_hash().context("Failed to get accounts hash")?;
-
         //create channels which will be used between scheduler, workers and issuer
         let (issuer_send_channel, scheduler_receiver_channel) = bounded(config.batch_size as usize * 2);
     
