@@ -5,6 +5,7 @@ use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
 use solana_sdk::transaction::SanitizedVersionedTransaction;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
+use crate::harness::scheduler::scheduler::{Scheduler, SequentialScheduler};
 use crate::utils::config::Config;
 use std::{path::PathBuf};
 use crate::harness::scheduler_harness::SchedulerHarness;
@@ -43,7 +44,7 @@ pub struct RescheduleArgs {
     pub transactions: Option<u64>,
 
     /// Scheduler type
-    #[arg(long, value_enum, default_value = "bloom")]
+    #[arg(long, value_enum, default_value = "sequential")]
     pub scheduler_type: Option<SchedulerType>,
 
     /// Scheduler transaction batch size 
@@ -79,42 +80,56 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     
     info!("Setting up directories and loading snapshots...");
     let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
-    //let start_accounts_hash = start_bank.get_accounts_hash().context("Failed to get accounts hash")?;
     info!("Completed setting up directories and loading snapshots...");
 
     info!("Loading transactions from local file");
     let transactions = load_transactions(
-        start_bank,
+        start_bank.clone(),
         config.network_type, 
         config.num_txs_to_process
     ).unwrap();
     info!("Loaded {} execution transactions from local file", transactions.len());
     
     info!("Initializing scheduler harness");
-    let scheduler_harness = match config.scheduler_type {
+    match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
+            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            info!("Initialized scheduler harness");
+    
+            info!("Starting scheduler harness");
+            scheduler_harness.run();
+            info!("Finalized scheduler harness");
         }
         SchedulerType::Greedy => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
+            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            info!("Initialized scheduler harness");
+    
+            info!("Starting scheduler harness");
+            scheduler_harness.run();
+            info!("Finalized scheduler harness");
         },
         SchedulerType::PrioGraph => {
             let scheduler = BloomScheduler;
-            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
+            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            info!("Initialized scheduler harness");
+    
+            info!("Starting scheduler harness");
+            scheduler_harness.run();
+            info!("Finalized scheduler harness");
         },
         SchedulerType::Sequential => {
-            let scheduler = BloomScheduler;
+            let scheduler = SequentialScheduler;
             config.num_workers = 1; //in sequential mode we only use one worker for executing txs
-            SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions)?
+            let scheduler_harness = SchedulerHarness::<SequentialScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            info!("Initialized scheduler harness");
+    
+            info!("Starting scheduler harness");
+            scheduler_harness.run();
+            info!("Finalized scheduler harness");
         }
     };
-    info!("Initialized scheduler harness");
-    
-    info!("Starting scheduler harness");
-    scheduler_harness.run();
-    info!("Finalized scheduler harness");
     
     /* info!(
         total_duration_ms = overall_duration.as_millis(),

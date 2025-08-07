@@ -2,7 +2,8 @@ use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use thiserror::Error;
 use crossbeam_channel::{Receiver,Sender};
 use tracing::info;
-// TODO: move these structures in a common place
+use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+use solana_sdk::transaction::SanitizedTransaction;
 
 // we should be able to send and receive either one or more txs at once
 #[derive(Debug, Clone)]
@@ -21,9 +22,9 @@ pub struct Work<Tx> {
 #[derive(Debug, Error)]
 pub enum SchedulerError {
     #[error("Sending channel disconnected: {0}")]
-    DisconnectedSendChannel(&'static str),
+    DisconnectedSendChannel(String),
     #[error("Recv channel disconnected: {0}")]
-    DisconnectedRecvChannel(&'static str),
+    DisconnectedRecvChannel(String),
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -38,7 +39,7 @@ pub struct SchedulingSummary {
 
 
 pub trait Scheduler {
-    type Tx: Send + Sync + 'static;
+    type Tx: TransactionWithMeta + Send + Sync + 'static;
     /// basic scheduler function that should:
     /// 1. pull data from the work issuer channel
     /// 2. schedule it as single or list of txs
@@ -49,15 +50,28 @@ pub trait Scheduler {
         execution_channels: &[Sender<Work<Self::Tx>>]
     ) -> Result<SchedulingSummary, SchedulerError>{
         
-        //for now just echo the txs to first worker
-        let tx = issue_channel.recv().unwrap();
-        execution_channels[0].send(tx);
-       
-        Ok(SchedulingSummary{
-            num_scheduled:0,
-            num_unschedulable_conflicts:0,
-            num_unschedulable_threads:0
-        })
+        //this implements a dummy sequential scheduler for a single worker
+        match issue_channel.recv() {
+            Ok(tx) => {
+                match execution_channels[0].send(tx) {
+                    Ok(_) => {
+                        info!("Scheduled transaction to worker");
+                        return Ok(SchedulingSummary{
+                            num_scheduled:1,
+                            num_unschedulable_conflicts:0,
+                            num_unschedulable_threads:0
+                        });
+                    }
+                    Err(e) => return Err(SchedulerError::DisconnectedSendChannel(format!("{:?}", e))) 
+                }
+            },
+            Err(e) => return Err(SchedulerError::DisconnectedRecvChannel(format!("{:?}", e)))
+        }
     }
 
+}
+
+pub struct SequentialScheduler;
+impl Scheduler for SequentialScheduler {
+    type Tx = RuntimeTransaction<SanitizedTransaction>;
 }

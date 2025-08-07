@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
-use tracing::info;
 use crate::harness::scheduler::tx_scheduler::{TxScheduler};
 use crate::harness::tx_executor::TxExecutor;
 use crate::{harness::tx_issuer::TxIssuer};
 use crate::harness::scheduler::scheduler::{Scheduler};
 use crate::utils::config::Config;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-use crate::utils::snapshot::load_bank_from_snapshot;
+use std::sync::Arc;
+use solana_runtime::bank::Bank;
 
 #[derive(Debug)]
 pub struct SchedulerHarness<S> where S:Scheduler
@@ -20,7 +20,7 @@ pub struct SchedulerHarness<S> where S:Scheduler
 impl<S> SchedulerHarness<S>  where 
 S: Scheduler + Send + Sync + 'static
 {
-    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<S::Tx>) -> anyhow::Result<Self> {
+    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<S::Tx>, bank:Arc<Bank>) -> anyhow::Result<Self> {
         
         //create channels which will be used between scheduler, workers and issuer
         let (issuer_send_channel, scheduler_receiver_channel) = bounded(config.batch_size as usize * 2);
@@ -39,7 +39,8 @@ S: Scheduler + Send + Sync + 'static
         for i in 0..config.num_workers {
             tx_executors.push(TxExecutor::new(
                 execute_to_schedule_receive_channels[i as usize].clone(),
-                execute_to_issuer_send_channels[i as usize].clone()
+                execute_to_issuer_send_channels[i as usize].clone(),
+                bank.clone()
             ));
         }
 
@@ -53,6 +54,7 @@ S: Scheduler + Send + Sync + 'static
 
 
     pub fn run(self) {
+        //TODO: Need to compute execution time and return it
         let mut harness_hdls = vec![];
         harness_hdls.push(self.tx_issuer.run());
         harness_hdls.push(self.tx_scheduler.run());

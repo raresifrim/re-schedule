@@ -1,14 +1,13 @@
 use  crate::utils::types::{ CustomClientTrait};
 use async_trait::async_trait;
 use bzip2::read::BzDecoder;
-use bzip2::Decompress;
 use tar::Archive;
 use std::fs;
 use std::path::Path;
 use anyhow::{Context,Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
-use std::io::{Read, Write};
+use std::io::Write;
 use crate::utils::types::{RpcBlock};
 use crate::utils::config::{load_json_config, upload_json_config, NetworkType};
 use std::path::PathBuf;
@@ -16,7 +15,7 @@ use tracing::info;
 use std::io;
 use solana_transaction_status::UiTransactionEncoding;
 use solana_transaction_status::TransactionDetails;
-use std::io::BufReader;
+
 
 pub struct SolanaClient {
     client: RpcClient

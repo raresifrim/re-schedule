@@ -1,5 +1,4 @@
 use crossbeam_channel::{Sender,Receiver};
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use crate::harness::scheduler::scheduler::{Scheduler, Work};
 use tracing::info;
 
