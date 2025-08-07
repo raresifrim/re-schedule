@@ -1,11 +1,14 @@
 use  crate::utils::types::{ CustomClientTrait};
 use async_trait::async_trait;
+use bzip2::read::BzDecoder;
+use bzip2::Decompress;
+use tar::Archive;
 use std::fs;
 use std::path::Path;
 use anyhow::{Context,Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
-use std::io::Write;
+use std::io::{Read, Write};
 use crate::utils::types::{RpcBlock};
 use crate::utils::config::{load_json_config, upload_json_config, NetworkType};
 use std::path::PathBuf;
@@ -13,6 +16,7 @@ use tracing::info;
 use std::io;
 use solana_transaction_status::UiTransactionEncoding;
 use solana_transaction_status::TransactionDetails;
+use std::io::BufReader;
 
 pub struct SolanaClient {
     client: RpcClient
@@ -122,9 +126,31 @@ impl CustomClientTrait for SolanaClient {
         let mut config = load_json_config("config.json").context("Could not get config file").unwrap();
         let network_config = config.networks.get_mut(&network_key).unwrap();
         network_config.start_snapshot = actual_filename.clone();
-        upload_json_config("config.json", config)?;
+        upload_json_config("config.json", config)?; 
 
-        Ok((actual_filename, snapshot_slot.full)) // Use the filename obtained from the redirect 
+        info!("Preparing to download and extract genesis binary");
+        let base_url = self.client.url();
+        let base_url = base_url.trim_end_matches('/');
+        // Construct the base download URL - assuming it's /snapshot.tar.bz2
+        let base_download_url = format!("{}/genesis.tar.bz2", base_url);
+        info!(url = %base_download_url, "Constructed genesis download URL");
+        info!("Downloading genesis binary archive from {base_download_url}");
+        let temp_download_path = PathBuf::from("./genesis").join(network_key.clone()).join("genesis.tar.bz2");
+        Self::download_file(&base_download_url, temp_download_path.as_path()).await?;
+        info!("Extracting genesis binary from archive");
+        let decompressor = BzDecoder::new(fs::File::open(temp_download_path).unwrap());
+        let mut archive = Archive::new(decompressor);
+        for (_, file) in archive.entries().unwrap().enumerate() {
+            let mut file = file.unwrap();
+            let file_path = file.path()?;
+            if file_path.to_str().unwrap().contains("genesis.bin")
+            {
+                file.unpack(PathBuf::from("./genesis").join(network_key.clone()).join("genesis.bin"))?;
+            }
+        }
+        fs::remove_file(PathBuf::from("./genesis").join(network_key.clone()).join("genesis.tar.bz2"))?;
+        
+        Ok((String::new(), snapshot_slot.full)) // Use the filename obtained from the redirect 
     }
 
     /// Helper to download a file from a URL. Returns the final filename after redirects.
