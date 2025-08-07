@@ -3,7 +3,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
+use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_sdk::transaction::SanitizedVersionedTransaction;
+use solana_svm_transaction::svm_message::SVMMessage;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::scheduler::{Scheduler, SequentialScheduler};
 use crate::utils::config::Config;
@@ -28,6 +30,15 @@ use solana_sdk::transaction::AddressLoaderError;
 use solana_message::v0::LoadedAddresses;
 use std::sync::Arc;
 use crate::utils::snapshot::load_bank_from_snapshot;
+use solana_message::AccountKeys;
+use solana_svm::account_overrides::AccountOverrides;
+use solana_sdk::sysvar;
+use solana_sdk::sysvar::slot_history::*;
+use solana_accounts_db::ancestors::Ancestors;
+use solana_account::AccountSharedData;
+use solana_sdk::slot_history::Check;
+use solana_account::from_account;
+use crate::harness::scheduler::scheduler::HarnessTransaction;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -83,8 +94,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     info!("Completed setting up directories and loading snapshots...");
 
     info!("Loading transactions from local file");
-    let transactions = load_transactions(
-        start_bank.clone(),
+    let transactions = load_runtime_transactions(
+        &start_bank,
         config.network_type, 
         config.num_txs_to_process
     ).unwrap();
@@ -151,8 +162,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
 }
 
-fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u64) -> anyhow::Result<VecDeque<RuntimeTransaction<SanitizedTransaction>>> {
-        let mut transactions = VecDeque::<RuntimeTransaction<SanitizedTransaction>>::new();
+fn load_runtime_transactions(root_bank: &Arc<Bank>, network_type: NetworkType, num_txs: u64) -> anyhow::Result<VecDeque<HarnessTransaction<RuntimeTransaction<SanitizedTransaction>>>> {
+        let mut transactions = VecDeque::new();
 
         let network_key = network_type.to_string();
         let cache_dir = PathBuf::from("./cache");
@@ -186,10 +197,10 @@ fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u
                 None
             )?;
             if !runtime_tx.is_simple_vote_transaction() {
-                let final_tx = build_sanitized_transaction(
+                let final_tx= build_sanitized_transaction(
                         runtime_tx,
-                        root_bank.as_ref(),
-                        root_bank.get_reserved_account_keys(),
+                        root_bank,
+                        root_bank.get_reserved_account_keys().clone(),
                 )?;
                 transactions.push_back(final_tx);
             }
@@ -210,9 +221,9 @@ fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u
 
  pub fn build_sanitized_transaction(
         tx: RuntimeTransaction<SanitizedVersionedTransaction>,
-        bank: &Bank,
-        reserved_account_keys: &HashSet<Pubkey>,
-    ) -> anyhow::Result<RuntimeTransaction<SanitizedTransaction>> {
+        bank: &Arc<Bank>,
+        reserved_account_keys: HashSet<Pubkey>,
+    ) -> anyhow::Result<HarnessTransaction<RuntimeTransaction<SanitizedTransaction>>> {
        
         // Resolve the lookup addresses and retrieve the min deactivation slot
         let (loaded_addresses, _) = resolve_addresses_with_deactivation(&tx, bank)?;
@@ -221,9 +232,12 @@ fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u
             RuntimeTransaction::<SanitizedTransaction>::try_from(
                 tx,
                 address_loader,
-                reserved_account_keys,
+                &reserved_account_keys,
             )?;
-        Ok(tx)
+        //geerate account overrides for re-executaion of transactions
+        //this is for overcoming the AlreadyProcessed type of error
+        let accounts = get_account_overrides_for_simulation(&bank,&tx.account_keys());
+        Ok(HarnessTransaction { transaction: tx, account_overrides: accounts })
     }
 
     fn resolve_addresses_with_deactivation(
@@ -240,4 +254,41 @@ fn load_transactions(root_bank: Arc<Bank>, network_type: NetworkType, num_txs: u
                 .iter()
                 .map(SVMMessageAddressTableLookup::from),
         )
+    }
+
+    fn get_account_overrides_for_simulation(bank: &Arc<Bank>, account_keys: &AccountKeys) -> AccountOverrides {
+        let mut account_overrides = AccountOverrides::default();
+        let slot_history_id = sysvar::slot_history::id();
+        if account_keys.iter().any(|pubkey| *pubkey == slot_history_id) {
+            let current_account = bank.get_account_with_fixed_root(&slot_history_id);
+            let slot_history = current_account
+                .as_ref()
+                .map(|account| from_account::<SlotHistory, _>(account).unwrap())
+                .unwrap_or_default();
+            if slot_history.check(bank.slot()) == Check::Found {
+                let ancestors = Ancestors::from(proper_ancestors(bank).collect::<Vec<_>>());
+                if let Some((account, _)) =
+                    load_slow_with_fixed_root(bank, &ancestors, &slot_history_id)
+                {
+                    account_overrides.set_slot_history(Some(account));
+                }
+            }
+        }
+        account_overrides
+    }
+
+    
+    fn proper_ancestors(bank:&Arc<Bank>) -> impl Iterator<Item = Slot> + '_ {
+        bank.ancestors
+            .keys()
+            .into_iter()
+            .filter(move |slot| *slot != bank.slot())
+    }
+
+    fn load_slow_with_fixed_root(
+        bank: &Arc<Bank>,
+        ancestors: &Ancestors,
+        pubkey: &Pubkey,
+    ) -> Option<(AccountSharedData, Slot)> {
+        bank.rc.accounts.load_with_fixed_root(ancestors, pubkey)
     }

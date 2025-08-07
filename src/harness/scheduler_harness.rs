@@ -2,13 +2,13 @@ use std::collections::VecDeque;
 use crate::harness::scheduler::tx_scheduler::{TxScheduler};
 use crate::harness::tx_executor::TxExecutor;
 use crate::{harness::tx_issuer::TxIssuer};
-use crate::harness::scheduler::scheduler::{Scheduler};
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
 use crate::utils::config::Config;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use solana_svm::account_overrides::AccountOverrides;
 use std::sync::Arc;
 use solana_runtime::bank::Bank;
 
-#[derive(Debug)]
 pub struct SchedulerHarness<S> where S:Scheduler
 {
     config: Config,
@@ -20,7 +20,7 @@ pub struct SchedulerHarness<S> where S:Scheduler
 impl<S> SchedulerHarness<S>  where 
 S: Scheduler + Send + Sync + 'static
 {
-    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<S::Tx>, bank:Arc<Bank>) -> anyhow::Result<Self> {
+    pub fn new_from_config(config: Config, scheduler: S, transactions: VecDeque<HarnessTransaction<S::Tx>>, bank:Arc<Bank>) -> anyhow::Result<Self> {
         
         //create channels which will be used between scheduler, workers and issuer
         let (issuer_send_channel, scheduler_receiver_channel) = bounded(config.batch_size as usize * 2);

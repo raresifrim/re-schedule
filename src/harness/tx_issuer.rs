@@ -2,14 +2,12 @@ use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
 use std::collections::VecDeque;
 use tracing::info;
-use crate::harness::scheduler::scheduler::Work;
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::tx_executor::FinishedWork;
 
-
-#[derive(Debug)]
 pub struct TxIssuer<Tx> {
-    transactions: VecDeque<Tx>,
+    transactions: VecDeque<HarnessTransaction<Tx>>,
     completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
     work_sender: Sender<Work<Tx>>,
 }
@@ -19,7 +17,7 @@ where Tx: Send + Sync + 'static {
     pub fn new(
         completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
         work_sender: Sender<Work<Tx>>,
-        transactions: VecDeque<Tx>,
+        transactions: VecDeque<HarnessTransaction<Tx>>,
     ) -> Self {
         Self {
             transactions,

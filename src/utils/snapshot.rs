@@ -8,8 +8,24 @@ use solana_runtime::{
 use solana_sdk::genesis_config::GenesisConfig;
 use std::sync::{atomic::AtomicBool, Arc};
 use tracing::info;
-
+use solana_svm::transaction_processor::TransactionBatchProcessor;
+use solana_program_runtime::{loaded_programs::{BlockRelation, ForkGraph}};
+use std::cmp::Ordering;
+use solana_sdk::slot_history::Slot;
+use std::sync::RwLock;
 use super::config::Snapshot;
+
+pub struct MockForkGraph {}
+
+impl ForkGraph for MockForkGraph {
+    fn relationship(&self, a: Slot, b: Slot) -> BlockRelation {
+        match a.cmp(&b) {
+            Ordering::Less => BlockRelation::Ancestor,
+            Ordering::Equal => BlockRelation::Equal,
+            Ordering::Greater => BlockRelation::Descendant,
+        }
+    }
+}
 
 pub fn load_bank_from_snapshot(
     snapshot: &Snapshot,
@@ -45,6 +61,12 @@ pub fn load_bank_from_snapshot(
 
     let bank_forks = BankForks::new_rw_arc(snapshot_bank);
     let snapshot_bank = bank_forks.read().unwrap().working_bank();
+
+    let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));
+            let batch_processor = TransactionBatchProcessor::new(self.bank.slot(), self.bank.epoch(), Arc::downgrade(&fork_graph), None, None);
+            self.bank.configure_sysvars();
+            batch_processor.fill_missing_sysvar_cache_entries(self.bank);
+            register_builtins(&mock_bank, &batch_processor, test_entry.with_loader_v4);
 
     info!(
         "Successfully built bank from snapshot (slot: {})!",

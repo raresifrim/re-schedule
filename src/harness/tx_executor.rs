@@ -1,11 +1,15 @@
+use anyhow::Context;
 use crossbeam_channel::{Receiver,Sender};
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_runtime::bank::LoadAndExecuteTransactionsOutput;
-use solana_svm::transaction_processing_result::ProcessedTransaction;
+use solana_svm::account_overrides;
+use solana_svm::account_overrides::AccountOverrides;
 use tracing::info;
+use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::Work;
 use solana_runtime::bank::Bank;
+use std::collections::HashMap;
 use std::sync::Arc;
 use solana_runtime::transaction_batch::TransactionBatch;
 use solana_runtime::transaction_batch::OwnedOrBorrowed;
@@ -15,6 +19,12 @@ use solana_svm::transaction_processor::TransactionProcessingConfig;
 use solana_svm::transaction_processor::ExecutionRecordingConfig;
 use solana_timings::ExecuteTimings;
 use solana_svm::transaction_processing_result::TransactionProcessingResultExtensions;
+use solana_account::AccountSharedData;
+use solana_pubkey::Pubkey;
+use solana_accounts_db::account_locks::validate_account_locks;
+use std::slice;
+use solana_svm::transaction_processing_result::ProcessedTransaction;
+
 
 /// Message: [Worker -> Issuer]
 /// Processed transactions.
@@ -43,6 +53,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
     pub fn run(self) -> std::thread::JoinHandle<()>{
         let handle = std::thread::spawn(move || {
             info!("Startng worker thread");
+            
             self.execute_txs();
         });
         //return handle
@@ -52,22 +63,23 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         while let Ok(work) = self.work_receiver.recv() {
             info!("Received new batch of work...");
 
-            let mut transactions = vec![];
+            let mut harness_transactions = vec![];
             match work.entry {
-                WorkEntry::SingleTx(tx) => transactions.push(tx),
-                WorkEntry::MultipleTxs(txs) => transactions = txs,
+                WorkEntry::SingleTx(tx) => harness_transactions.push(tx),
+                WorkEntry::MultipleTxs(txs) => harness_transactions = txs
             }
             
-            let processed_output = self.process_transactions(&self.bank, &transactions);
-            info!("Processed a total of {:?} from the given {} txs batch", processed_output.processed_counts, transactions.len());
+            let processed_output = self.process_transactions(&self.bank, &harness_transactions);
             
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
-            for (processing_result, tx) in processed_output.processing_results.iter().zip(transactions)
+            for (processed_result, tx) in  processed_output.iter().zip(harness_transactions)
             {   
-                if processing_result.was_processed_with_successful_result() {
+                if processed_result.was_processed_with_successful_result() {
+                    info!("Processed transaction with success:{:?}", processed_result);
                     completed_txs.push(tx);
                 } else {
+                    info!("Transaction processing failed:{:?}", processed_result);
                     failed_txs.push(tx);
                 }
             }
@@ -92,68 +104,72 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 // kill this worker if finished_work channel is broken
                 break;
             } 
-            info!("Tx Executed successfuly");
+            info!("Transaction executed and result sent back for recording");
         }
     }
 
-    fn process_transactions(&self,  bank: &Arc<Bank>, transactions: &[Tx]) -> LoadAndExecuteTransactionsOutput {
+    fn process_transactions(&self,  bank: &Arc<Bank>,  harness_transactions: &[HarnessTransaction<Tx>]) -> Vec<Result<ProcessedTransaction>> {
         
-        //lock accounts of all txs in batch
-        let batch  = TransactionBatch::new(
-            bank.try_lock_accounts_with_results(transactions, transactions.iter().map(|_| Ok(()))),
+        let mut actual_execute_time: u64 = 0;
+        let mut transaction_results = vec![];
+
+        for tx in harness_transactions {
+            let (tx_result, tx_time) = self.process_single_transaction(bank, &tx.transaction, &tx.account_overrides);
+            transaction_results.extend(tx_result);
+            actual_execute_time += tx_time;
+        }
+
+        info!("Executed {} transactions in {} us", harness_transactions.len(), actual_execute_time);
+        
+        //return execution result
+        transaction_results
+    }
+
+   fn process_single_transaction(&self,  bank: &Arc<Bank>, transaction: &Tx, account_override: &AccountOverrides) -> (Vec<Result<ProcessedTransaction>>, u64) {
+
+        bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
+        let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
+        let lock_result = validate_account_locks(transaction.account_keys(), tx_account_lock_limit);
+        let mut batch = TransactionBatch::new(
+            vec![lock_result],
             bank,
-            OwnedOrBorrowed::Borrowed(transactions),
+            OwnedOrBorrowed::Borrowed(slice::from_ref(transaction)),
+        );
+        batch.set_needs_unlock(false);
+        let mut timings = ExecuteTimings::default();
+
+        info!("Processing tx with account override: {:?}", transaction);
+
+        let LoadAndExecuteTransactionsOutput {
+            processing_results,
+            ..
+        } = bank.load_and_execute_transactions(
+            &batch,
+            150,
+            &mut timings,
+            &mut TransactionErrorMetrics::default(),
+            TransactionProcessingConfig {
+                account_overrides: Some(account_override),
+                check_program_modification_slot: bank.check_program_modification_slot(),
+                log_messages_bytes_limit: None,
+                limit_to_load_programs: true,
+                recording_config: ExecutionRecordingConfig {
+                    enable_cpi_recording: true,
+                    enable_log_recording: true,
+                    enable_return_data_recording: true,
+                    enable_transaction_balance_recording: false,
+                },
+            },
         );
 
-        //check which txs throwed an error
-        let mut error_counters = TransactionErrorMetrics::default();
-        let mut retryable_transaction_indexes: Vec<_> = batch
-            .lock_results()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, res)| match res {
-                // following are retryable errors
-                Err(TransactionError::AccountInUse) => {
-                    error_counters.account_in_use += 1;
-                    Some(index)
-                }
-                // following are non-retryable errors
-                Err(TransactionError::TooManyAccountLocks) => {
-                    error_counters.too_many_account_locks += 1;
-                    None
-                }
-                //other types of errors are not of interest in. this harness environment yet
-                Err(_) => None,
-                Ok(_) => None,
-            })
-            .collect();
-        info!("Found following tx indexes inside batch that must be retried:{:?}", retryable_transaction_indexes);
-        
-        //execute and record execution time
-        let mut execute_timings = ExecuteTimings::default();
-        let load_and_execute_transactions_output= bank
-            .load_and_execute_transactions(
-                &batch,
-                150,
-                &mut execute_timings,
-                &mut error_counters,
-                TransactionProcessingConfig {
-                    account_overrides: None,
-                    check_program_modification_slot: bank.check_program_modification_slot(),
-                    log_messages_bytes_limit: None,
-                    limit_to_load_programs: true,
-                    recording_config: ExecutionRecordingConfig::new_single_setting(true),
-                }
-            );
-        //compute total execution time
-        let actual_execute_time = execute_timings
+        info!("Processed transaction timings: {:?}", timings);
+        let actual_execute_time = timings
             .execute_accessories
             .process_instructions
             .total_us
             .0;
-        info!("Executed batch of {} in {} us", transactions.len(), actual_execute_time);
-        
-        //return execution result
-        load_and_execute_transactions_output
-    }
+        (processing_results, actual_execute_time)
+
+   }
+
 }

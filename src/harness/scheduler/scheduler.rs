@@ -1,21 +1,28 @@
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_svm::account_overrides::AccountOverrides;
 use thiserror::Error;
 use crossbeam_channel::{Receiver,Sender};
 use tracing::info;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 
+pub struct HarnessTransaction<Tx>
+{
+    pub transaction: Tx,
+    pub account_overrides: AccountOverrides
+}
+
 // we should be able to send and receive either one or more txs at once
-#[derive(Debug, Clone)]
-pub enum WorkEntry<Tx> {
-    SingleTx(Tx),
-    MultipleTxs(Vec<Tx>)
+pub enum WorkEntry<Tx>
+{
+    SingleTx(HarnessTransaction<Tx>),
+    MultipleTxs(Vec<HarnessTransaction<Tx>>)
 }
 
 /// Message: [Issuer -> Scheduler]
 /// Message: [Scheduler -> Executor]
-#[derive(Debug, Clone)]
-pub struct Work<Tx> {
+pub struct Work<Tx> 
+{
     pub entry: WorkEntry<Tx>,
 }
 
