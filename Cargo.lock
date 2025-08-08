@@ -7728,6 +7728,7 @@ dependencies = [
  "solana-svm-rent-collector",
  "solana-svm-transaction",
  "solana-system-interface",
+ "solana-system-program",
  "solana-system-transaction",
  "solana-sysvar",
  "solana-sysvar-id",
@@ -8284,6 +8285,7 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "percentage",
+ "qualifier_attr",
  "serde",
  "serde_derive",
  "solana-account",
@@ -8888,8 +8890,10 @@ version = "2.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21702e8b9fc8ae979a1c4693d09b6f91252ebad4398f6938a21cc686a637ce9f"
 dependencies = [
+ "bincode",
  "itertools 0.12.1",
  "log",
+ "rand 0.8.5",
  "serde",
  "serde_derive",
  "solana-account",

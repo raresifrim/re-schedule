@@ -1,36 +1,21 @@
 use anyhow::Context;
 use solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS;
+use solana_pubkey::Pubkey;
 use solana_runtime::{
-    bank_forks::BankForks, runtime_config::RuntimeConfig,
-    snapshot_archive_info::FullSnapshotArchiveInfo,
-    snapshot_bank_utils::bank_from_snapshot_archives,
+    bank::Bank, bank_forks::BankForks, runtime_config::RuntimeConfig, snapshot_archive_info::FullSnapshotArchiveInfo, snapshot_bank_utils::bank_from_snapshot_archives
 };
 use solana_sdk::genesis_config::GenesisConfig;
 use std::sync::{atomic::AtomicBool, Arc};
 use tracing::info;
-use solana_svm::transaction_processor::TransactionBatchProcessor;
-use solana_program_runtime::{loaded_programs::{BlockRelation, ForkGraph}};
-use std::cmp::Ordering;
-use solana_sdk::slot_history::Slot;
 use std::sync::RwLock;
+
+
 use super::config::Snapshot;
-
-pub struct MockForkGraph {}
-
-impl ForkGraph for MockForkGraph {
-    fn relationship(&self, a: Slot, b: Slot) -> BlockRelation {
-        match a.cmp(&b) {
-            Ordering::Less => BlockRelation::Ancestor,
-            Ordering::Equal => BlockRelation::Equal,
-            Ordering::Greater => BlockRelation::Descendant,
-        }
-    }
-}
 
 pub fn load_bank_from_snapshot(
     snapshot: &Snapshot,
     genesis: &GenesisConfig,
-) -> anyhow::Result<Arc<solana_runtime::bank::Bank>> {
+) -> anyhow::Result<(Arc<solana_runtime::bank::Bank>,Arc<RwLock<BankForks>>)> {
     let snapshot_path = snapshot.path.clone();
     let accounts_dir = snapshot.accounts_dir.clone();
     let snapshot_dir = snapshot.snapshot_dir.clone();
@@ -58,20 +43,20 @@ pub fn load_bank_from_snapshot(
     )
     .context("Failed to create bank from snapshot archives")?;
     
-
+    let bank_forks = BankForks::new_rw_arc(snapshot_bank);
+    //this one is frozen
+    let snapshot_bank = bank_forks.read().unwrap().working_bank();
+    //so we should create a new one
+    let snapshot_bank = Bank::new_from_parent(snapshot_bank.clone(), &Pubkey::new_unique(), snapshot_bank.slot()+1);
+    
+    //recreate the bank_fork for the unfrozen bank
     let bank_forks = BankForks::new_rw_arc(snapshot_bank);
     let snapshot_bank = bank_forks.read().unwrap().working_bank();
-
-    let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));
-            let batch_processor = TransactionBatchProcessor::new(self.bank.slot(), self.bank.epoch(), Arc::downgrade(&fork_graph), None, None);
-            self.bank.configure_sysvars();
-            batch_processor.fill_missing_sysvar_cache_entries(self.bank);
-            register_builtins(&mock_bank, &batch_processor, test_entry.with_loader_v4);
-
+    
     info!(
         "Successfully built bank from snapshot (slot: {})!",
         snapshot_bank.slot()
     );
 
-    Ok(snapshot_bank)
+    Ok((snapshot_bank, bank_forks))
 }

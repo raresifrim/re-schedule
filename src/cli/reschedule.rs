@@ -1,9 +1,12 @@
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
+use solana_client::rpc_client::SerializableTransaction;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_sdk::hash::Hash;
+use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::SanitizedVersionedTransaction;
 use solana_svm_transaction::svm_message::SVMMessage;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
@@ -39,6 +42,8 @@ use solana_account::AccountSharedData;
 use solana_sdk::slot_history::Check;
 use solana_account::from_account;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
+use std::sync::RwLock;
+use solana_runtime::bank::BankStatusCache;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -90,7 +95,10 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     info!("Loaded configuration for replay");
     
     info!("Setting up directories and loading snapshots...");
-    let start_bank = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
+    let (start_bank, bank_forks) = load_bank_from_snapshot(&config.start_snapshot, &config.genesis).context("Failed to load start bank from snapshot")?;
+    //we must set the fork_graph cache for the extracted bank as it is not set automatically when unpacking snapshot 
+    let fork_graph = Arc::new(bank_forks);
+    start_bank.set_fork_graph_in_program_cache(Arc::downgrade(&fork_graph));
     info!("Completed setting up directories and loading snapshots...");
 
     info!("Loading transactions from local file");
@@ -175,6 +183,7 @@ fn load_runtime_transactions(root_bank: &Arc<Bank>, network_type: NetworkType, n
         let reader = io::BufReader::new(file);
         let base64_str: Vec<Vec<String>> = serde_json::from_reader(reader).context("Failed to parse tx json file")?;
         let base64_str: Vec<String> = base64_str.iter().map(|v| v[0].clone()).collect();
+        
         let versioned_txs: Vec<VersionedTransaction> = base64_str.iter().map(|v| {
             let tx_bytes = general_purpose::STANDARD.decode(&v).expect("Failed to decode base64 encoded tx");
             let tx = bincode::deserialize::<VersionedTransaction>(&tx_bytes).expect("Failed to deserialize tx");
@@ -234,7 +243,7 @@ fn load_runtime_transactions(root_bank: &Arc<Bank>, network_type: NetworkType, n
                 address_loader,
                 &reserved_account_keys,
             )?;
-        //geerate account overrides for re-executaion of transactions
+        //generate account overrides for re-executaion of transactions
         //this is for overcoming the AlreadyProcessed type of error
         let accounts = get_account_overrides_for_simulation(&bank,&tx.account_keys());
         Ok(HarnessTransaction { transaction: tx, account_overrides: accounts })

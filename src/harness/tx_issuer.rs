@@ -44,7 +44,9 @@ where Tx: Send + Sync + 'static {
 
             let selected_worker = recv_selector.try_select();
             match selected_worker {
-                Err(_) => info!("No confirmation recived form any worker, moving on..."),
+                Err(_) => {
+                    info!("No confirmation recived form any worker, moving on...");
+                },
                 Ok(operation) => {
                     let worker_index = operation.index();
                     info!("Received work from worker {:?}", worker_index);
@@ -77,8 +79,8 @@ where Tx: Send + Sync + 'static {
             }
 
             if self.transactions.is_empty() {
-                //no more txs to issue
-                break;
+                //no more txs to issue, so just wait for workers to send results back
+                continue;
             }
 
             //send available txs

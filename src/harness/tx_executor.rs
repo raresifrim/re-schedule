@@ -2,6 +2,7 @@ use anyhow::Context;
 use crossbeam_channel::{Receiver,Sender};
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_runtime::bank::LoadAndExecuteTransactionsOutput;
+use solana_sdk::clock::MAX_PROCESSING_AGE;
 use solana_svm::account_overrides;
 use solana_svm::account_overrides::AccountOverrides;
 use tracing::info;
@@ -69,7 +70,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 WorkEntry::MultipleTxs(txs) => harness_transactions = txs
             }
             
-            let processed_output = self.process_transactions(&self.bank, &harness_transactions);
+            let processed_output = self.process_transactions_one_by_one(&self.bank, &harness_transactions);
             
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
@@ -102,13 +103,14 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 .is_err()
             {
                 // kill this worker if finished_work channel is broken
+                info!("Tx issuer not present anymore, exiting as well...");
                 break;
             } 
             info!("Transaction executed and result sent back for recording");
         }
     }
 
-    fn process_transactions(&self,  bank: &Arc<Bank>,  harness_transactions: &[HarnessTransaction<Tx>]) -> Vec<Result<ProcessedTransaction>> {
+    fn process_transactions_one_by_one(&self,  bank: &Arc<Bank>,  harness_transactions: &[HarnessTransaction<Tx>]) -> Vec<Result<ProcessedTransaction>> {
         
         let mut actual_execute_time: u64 = 0;
         let mut transaction_results = vec![];
@@ -130,6 +132,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
         let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
         let lock_result = validate_account_locks(transaction.account_keys(), tx_account_lock_limit);
+        info!("lock results:{:?}", lock_result);
         let mut batch = TransactionBatch::new(
             vec![lock_result],
             bank,
@@ -138,14 +141,14 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         batch.set_needs_unlock(false);
         let mut timings = ExecuteTimings::default();
 
-        info!("Processing tx with account override: {:?}", transaction);
+        info!("Processing tx with signature and message hash: {:?}, {:?}", transaction.signature(), transaction.message_hash());
 
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             ..
         } = bank.load_and_execute_transactions(
             &batch,
-            150,
+            MAX_PROCESSING_AGE,
             &mut timings,
             &mut TransactionErrorMetrics::default(),
             TransactionProcessingConfig {
