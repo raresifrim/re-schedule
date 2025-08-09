@@ -51,7 +51,6 @@ impl Scheduler for RoundRobinScheduler {
         execution_channels: &[Sender<Work<Self::Tx>>],
     ) -> Result<SchedulingSummary, SchedulerError> {
         //this implements a dummy sequential scheduler for a single worker
-
         loop {
             match issue_channel.try_recv() {
                 Ok(tx) => {
@@ -96,11 +95,11 @@ impl Scheduler for RoundRobinScheduler {
                     let mut num_scheduled = 0;
 
                     //get current workers that reached their quant
-                    let extracted = self.rr_distribution.extract_if(|k, v| v.0 == 0);
+                    let extracted = self.rr_distribution.extract_if(|_k, v| v.0 == 0);
 
                     //and send their txs
                     let mut used_workers = vec![];
-                    for (worker_index, (cuant, txs)) in extracted {
+                    for (worker_index, (_cuant, txs)) in extracted {
                         let num_txs = txs.len();
                         //channel must be unbounded so only possible error is a Disconnected one
                         match execution_channels[worker_index].send(Work {
@@ -109,7 +108,7 @@ impl Scheduler for RoundRobinScheduler {
                             Ok(_) => {
                                 num_scheduled += num_txs;
                                 used_workers.push(worker_index);
-                                info!("Schedued {} txs to worker {}", num_scheduled, worker_index);
+                                info!("Scheduled {} txs to worker {}", num_scheduled, worker_index);
                             }
                             Err(_) => {
                                 //for the moment we stop the entire execution if we see that one worker is not responding anymore
@@ -169,12 +168,12 @@ impl Scheduler for RoundRobinScheduler {
                                 };
                             }
 
-                            //refill rr_distribution
+                            //refill rr_distribution and reset last_worker
                             for index in 0..self.num_workers {
                                 self.rr_distribution.insert(index, (self.cu_quant, vec![]));
                             }
-                            
-                            info!("No more txs received, will try another round later...");
+                            self.last_worker = 0;
+                            //info!("No more txs received, will try another round later...");
                             return Ok(SchedulingSummary {
                                 num_scheduled,
                                 num_unschedulable_conflicts: 0,

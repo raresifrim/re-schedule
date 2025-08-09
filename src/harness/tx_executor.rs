@@ -3,14 +3,12 @@ use crossbeam_channel::{Receiver,Sender};
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_runtime::bank::LoadAndExecuteTransactionsOutput;
 use solana_sdk::clock::MAX_PROCESSING_AGE;
-use solana_svm::account_overrides;
 use solana_svm::account_overrides::AccountOverrides;
 use tracing::info;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::Work;
 use solana_runtime::bank::Bank;
-use std::collections::HashMap;
 use std::sync::Arc;
 use solana_runtime::transaction_batch::TransactionBatch;
 use solana_runtime::transaction_batch::OwnedOrBorrowed;
@@ -19,10 +17,6 @@ use solana_svm::transaction_error_metrics::TransactionErrorMetrics;
 use solana_svm::transaction_processor::TransactionProcessingConfig;
 use solana_svm::transaction_processor::ExecutionRecordingConfig;
 use solana_timings::ExecuteTimings;
-use solana_svm::transaction_processing_result::TransactionProcessingResultExtensions;
-use solana_account::AccountSharedData;
-use solana_pubkey::Pubkey;
-use solana_accounts_db::account_locks::validate_account_locks;
 use std::slice;
 use solana_svm::transaction_processing_result::ProcessedTransaction;
 
@@ -76,19 +70,29 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             let mut failed_txs = vec![];
             for (processed_result, tx) in  processed_output.iter().zip(harness_transactions)
             {   
-                let result = processed_result.as_ref().unwrap();
-                match result.status() {
-                    Ok(_) => {
-                        info!("Successfuly executed transaction identified by message hash and signature: {:?}, {:?}", 
+                match processed_result.as_ref() {
+                    Ok(pt) => {
+                        match pt.status() {
+                            Ok(_) => {
+                                info!("Successfuly executed transaction identified by message hash and signature: {:?}, {:?}", 
                                 tx.transaction.message_hash(),
                                 tx.transaction.signature());
-                        completed_txs.push(tx);
-                    },
-                    Err(e) => {
-                        info!("Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
+                                completed_txs.push(tx);
+                            },
+                            Err(e) => {
+                                info!("Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
                                 tx.transaction.message_hash(),
                                 tx.transaction.signature()
                                 ,e);
+                                failed_txs.push(tx);
+                            }
+                        };
+                    },
+                    Err(te) => {
+                        info!("Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
+                            tx.transaction.message_hash(),
+                            tx.transaction.signature()
+                            ,te);
                         failed_txs.push(tx);
                     }
                 };

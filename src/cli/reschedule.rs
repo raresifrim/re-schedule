@@ -41,7 +41,7 @@ use solana_account::AccountSharedData;
 use solana_sdk::slot_history::Check;
 use solana_account::from_account;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
-use crate::harness::scheduler::scheduler::RoundRobinScheduler;
+use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
 use solana_program_runtime::execution_budget::MAX_COMPUTE_UNIT_LIMIT;
 
 #[derive(Parser, Debug)]
@@ -143,7 +143,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             let scheduler = SequentialScheduler;
             config.num_workers = 1; //in sequential mode we only use one worker for executing txs
             let scheduler_harness = SchedulerHarness::<SequentialScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness");
+            info!("Initialized scheduler harness with Sequential scheduler");
     
             info!("Starting scheduler harness");
             scheduler_harness.run();
@@ -152,7 +152,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         SchedulerType::RoundRobin => {
             let scheduler = RoundRobinScheduler::new(config.num_workers as usize, MAX_COMPUTE_UNIT_LIMIT as u64, start_bank.clone());
             let scheduler_harness = SchedulerHarness::<RoundRobinScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness");
+            info!("Initialized scheduler harness with RoundRobin Scheduler");
     
             info!("Starting scheduler harness");
             scheduler_harness.run();

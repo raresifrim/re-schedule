@@ -68,10 +68,10 @@ where Tx: Send + Sync + 'static {
                                 );
                                 let failed_work = finished_work.failed_entry.unwrap();
                                 match failed_work {
-                                    WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
+                                    WorkEntry::SingleTx(tx) => self.transactions.push_back(tx),
                                     WorkEntry::MultipleTxs(mut txs) => {
                                         while !txs.is_empty() {
-                                            self.transactions.push_front(txs.pop().unwrap());
+                                            self.transactions.push_back(txs.pop().unwrap());
                                         }
                                     }
                                 };

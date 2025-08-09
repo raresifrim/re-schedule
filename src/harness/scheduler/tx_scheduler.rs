@@ -38,7 +38,7 @@ impl<S> TxScheduler<S> where
                         info!("Received following error from scheduler {:?}", e);
                         break;
                     }
-                    Ok(summary) => info!("Current scheduling summary: {:?}", summary)
+                    Ok(summary) => {}//info!("Current scheduling summary: {:?}", summary)
                 }    
             }
             
