@@ -42,8 +42,6 @@ use solana_account::AccountSharedData;
 use solana_sdk::slot_history::Check;
 use solana_account::from_account;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
-use std::sync::RwLock;
-use solana_runtime::bank::BankStatusCache;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -99,6 +97,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     //we must set the fork_graph cache for the extracted bank as it is not set automatically when unpacking snapshot 
     let fork_graph = Arc::new(bank_forks);
     start_bank.set_fork_graph_in_program_cache(Arc::downgrade(&fork_graph));
+    //clear status cache of the bank in order to execute old txs hat might still be cached and will otherwise return AlreadyProcessed
+    start_bank.status_cache.write().unwrap().clear();
     info!("Completed setting up directories and loading snapshots...");
 
     info!("Loading transactions from local file");

@@ -35,6 +35,8 @@ where Tx: Send + Sync + 'static {
     }
 
     fn issue_txs(&mut self) {
+        //issuer will stop once it gets all transactions executed
+        let mut num_txs = self.transactions.len();
         loop {
             //multiplex between channels and check first that sends something
             let mut recv_selector = Select::new();
@@ -55,7 +57,11 @@ where Tx: Send + Sync + 'static {
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
-                                info!("Received some completed txs");
+                                info!("Received successfully executed txs");
+                                match finished_work.completed_entry.unwrap() {
+                                    WorkEntry::SingleTx(_) => num_txs -= 1,
+                                    WorkEntry::MultipleTxs(txs) => num_txs -= txs.len()
+                                };
                             }
 
                             if finished_work.failed_entry.is_some() {
@@ -76,6 +82,11 @@ where Tx: Send + Sync + 'static {
                         Err(_) => info!("No completed work received yet"),
                     };
                 }
+            }
+
+            if num_txs == 0 {
+                //we received all txs back so we can exit
+                break;
             }
 
             if self.transactions.is_empty() {

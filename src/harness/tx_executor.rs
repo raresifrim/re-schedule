@@ -76,13 +76,22 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             let mut failed_txs = vec![];
             for (processed_result, tx) in  processed_output.iter().zip(harness_transactions)
             {   
-                if processed_result.was_processed_with_successful_result() {
-                    info!("Processed transaction with success:{:?}", processed_result);
-                    completed_txs.push(tx);
-                } else {
-                    info!("Transaction processing failed:{:?}", processed_result);
-                    failed_txs.push(tx);
-                }
+                let result = processed_result.as_ref().unwrap();
+                match result.status() {
+                    Ok(_) => {
+                        info!("Successfuly executed transaction identified by message hash and signature: {:?}, {:?}", 
+                                tx.transaction.message_hash(),
+                                tx.transaction.signature());
+                        completed_txs.push(tx);
+                    },
+                    Err(e) => {
+                        info!("Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
+                                tx.transaction.message_hash(),
+                                tx.transaction.signature()
+                                ,e);
+                        failed_txs.push(tx);
+                    }
+                };
             }
 
             let completed_entries = match completed_txs.len() {
@@ -129,20 +138,23 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
 
    fn process_single_transaction(&self,  bank: &Arc<Bank>, transaction: &Tx, account_override: &AccountOverrides) -> (Vec<Result<ProcessedTransaction>>, u64) {
 
-        bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
         let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
         let lock_result = validate_account_locks(transaction.account_keys(), tx_account_lock_limit);
         info!("lock results:{:?}", lock_result);
-        let mut batch = TransactionBatch::new(
+        let batch = TransactionBatch::new(
             vec![lock_result],
             bank,
             OwnedOrBorrowed::Borrowed(slice::from_ref(transaction)),
         );
-        batch.set_needs_unlock(false);
+        //batch.set_needs_unlock(false);
         let mut timings = ExecuteTimings::default();
 
         info!("Processing tx with signature and message hash: {:?}, {:?}", transaction.signature(), transaction.message_hash());
 
+        //prepare bank for current tx as it might be older than the current snapshot
+        bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
+        bank.register_recent_blockhash_for_test(transaction.recent_blockhash(), None);
+        
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             ..
