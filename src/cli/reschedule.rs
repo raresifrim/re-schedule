@@ -9,7 +9,6 @@ use solana_sdk::hash::Hash;
 use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::SanitizedVersionedTransaction;
 use solana_svm_transaction::svm_message::SVMMessage;
-use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::scheduler::{Scheduler, SequentialScheduler};
 use crate::utils::config::Config;
 use std::{path::PathBuf};
@@ -114,8 +113,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     info!("Initializing scheduler harness");
     match config.scheduler_type {
         SchedulerType::Bloom => {
-            let scheduler = BloomScheduler;
-            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            let scheduler = SequentialScheduler;
+            let scheduler_harness = SchedulerHarness::<SequentialScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
     
             info!("Starting scheduler harness");
@@ -123,8 +122,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             info!("Finalized scheduler harness");
         }
         SchedulerType::Greedy => {
-            let scheduler = BloomScheduler;
-            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            let scheduler = SequentialScheduler;
+            let scheduler_harness = SchedulerHarness::<SequentialScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
     
             info!("Starting scheduler harness");
@@ -132,8 +131,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             info!("Finalized scheduler harness");
         },
         SchedulerType::PrioGraph => {
-            let scheduler = BloomScheduler;
-            let scheduler_harness = SchedulerHarness::<BloomScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
+            let scheduler = SequentialScheduler;
+            let scheduler_harness = SchedulerHarness::<SequentialScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
     
             info!("Starting scheduler harness");

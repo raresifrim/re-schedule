@@ -161,9 +161,9 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             &mut TransactionErrorMetrics::default(),
             TransactionProcessingConfig {
                 account_overrides: Some(account_override),
-                check_program_modification_slot: bank.check_program_modification_slot(),
+                check_program_modification_slot: false,
                 log_messages_bytes_limit: None,
-                limit_to_load_programs: true,
+                limit_to_load_programs: false,
                 recording_config: ExecutionRecordingConfig {
                     enable_cpi_recording: true,
                     enable_log_recording: true,
