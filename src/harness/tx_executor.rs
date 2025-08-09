@@ -138,23 +138,19 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
 
    fn process_single_transaction(&self,  bank: &Arc<Bank>, transaction: &Tx, account_override: &AccountOverrides) -> (Vec<Result<ProcessedTransaction>>, u64) {
 
-        let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
-        let lock_result = validate_account_locks(transaction.account_keys(), tx_account_lock_limit);
-        info!("lock results:{:?}", lock_result);
         let batch = TransactionBatch::new(
-            vec![lock_result],
+            bank.try_lock_accounts_with_results(slice::from_ref(transaction), slice::from_ref(transaction).into_iter().map(|_| Ok(()))),
             bank,
             OwnedOrBorrowed::Borrowed(slice::from_ref(transaction)),
         );
-        //batch.set_needs_unlock(false);
-        let mut timings = ExecuteTimings::default();
-
+        
         info!("Processing tx with signature and message hash: {:?}, {:?}", transaction.signature(), transaction.message_hash());
 
         //prepare bank for current tx as it might be older than the current snapshot
         bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
         bank.register_recent_blockhash_for_test(transaction.recent_blockhash(), None);
         
+        let mut timings = ExecuteTimings::default();
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             ..

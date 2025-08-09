@@ -46,12 +46,10 @@ where Tx: Send + Sync + 'static {
 
             let selected_worker = recv_selector.try_select();
             match selected_worker {
-                Err(_) => {
-                    info!("No confirmation recived form any worker, moving on...");
-                },
+                Err(_) => {/*No confirmation recived form any worker, moving on...*/},
                 Ok(operation) => {
                     let worker_index = operation.index();
-                    info!("Received work from worker {:?}", worker_index);
+                    //info!("Received work from worker {:?}", worker_index);
                     //try non-blocking receive to see if there were any blocked txs
                     //but only receive one at a time so that we issue it to the scheduler immediately
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
@@ -79,7 +77,7 @@ where Tx: Send + Sync + 'static {
                                 };
                             }
                         }
-                        Err(_) => info!("No completed work received yet"),
+                        Err(_) => {/*"No completed work received yet"*/}
                     };
                 }
             }

@@ -65,7 +65,8 @@ pub enum SchedulerType {
     Greedy,
     PrioGraph,
     Bloom,
-    Sequential
+    Sequential,
+    RoundRobin
 }
 
 // New struct to represent a snapshot with its directories

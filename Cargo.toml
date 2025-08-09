@@ -21,8 +21,9 @@ solana-account = "2.1.21"
 solana-accounts-db = "2.1.21"
 solana-client = "2.1.21"
 solana-core = "2.1.21"
+solana-cost-model = "2.1.21"
 solana-message = {version="2.1.21", features = ["serde"]}
-solana-program-runtime = "2.3.6"
+solana-program-runtime = "2.1.21"
 solana-pubkey = "2.1.21"
 solana-runtime = {version="2.1.21", features = ["dev-context-only-utils"]}
 solana-runtime-transaction = "2.1.21"
