@@ -827,6 +827,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloom-1x"
+version = "0.1.0"
+source = "git+ssh://git@github.com/raresifrim/bloom-1x.git#300b9b974f0f17f33fc6fbdea76d3c57b9a1daac"
+dependencies = [
+ "xoodoo-hash",
+]
+
+[[package]]
 name = "borsh"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4485,6 +4493,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bincode",
+ "bloom-1x",
  "bzip2 0.6.0",
  "clap 4.5.43",
  "crossbeam-channel",
@@ -11122,6 +11131,11 @@ dependencies = [
  "libc",
  "rustix 1.0.8",
 ]
+
+[[package]]
+name = "xoodoo-hash"
+version = "0.1.0"
+source = "git+ssh://git@github.com/raresifrim/xoodoo-hash.git#f2468a06275f5d7eca184b90edc42961267c34cc"
 
 [[package]]
 name = "yoke"

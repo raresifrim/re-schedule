@@ -129,6 +129,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         let mut transaction_results = vec![];
 
         for tx in harness_transactions {
+            //2-120ms sleep, gaussian distribution with standard deviation of 10ms around 12 ms
             let (tx_result, tx_time) = self.process_single_transaction(bank, &tx.transaction, &tx.account_overrides);
             transaction_results.extend(tx_result);
             actual_execute_time += tx_time;
@@ -154,6 +155,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
         bank.register_recent_blockhash_for_test(transaction.recent_blockhash(), None);
         
+        // TODO: Check after line 353 in the transaction_processor.rs 
         let mut timings = ExecuteTimings::default();
         let LoadAndExecuteTransactionsOutput {
             processing_results,

@@ -1,12 +1,7 @@
-use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
-use solana_client::rpc_client::SerializableTransaction;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_runtime_transaction::transaction_meta::StaticMeta;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use solana_sdk::hash::Hash;
-use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::SanitizedVersionedTransaction;
 use solana_svm_transaction::svm_message::SVMMessage;
 use crate::harness::scheduler::scheduler::{Scheduler, SequentialScheduler};
@@ -150,7 +145,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             info!("Finalized scheduler harness");
         },
         SchedulerType::RoundRobin => {
-            let scheduler = RoundRobinScheduler::new(config.num_workers as usize, MAX_COMPUTE_UNIT_LIMIT as u64, start_bank.clone());
+            let cu_quant = MAX_COMPUTE_UNIT_LIMIT as u64/config.num_workers;
+            let scheduler = RoundRobinScheduler::new(config.num_workers as usize, cu_quant, start_bank.clone());
             let scheduler_harness = SchedulerHarness::<RoundRobinScheduler>::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness with RoundRobin Scheduler");
     
