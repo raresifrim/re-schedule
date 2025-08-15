@@ -1,6 +1,7 @@
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
 use std::collections::VecDeque;
+use std::time::Instant;
 use tracing::info;
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
 use crate::harness::scheduler::scheduler::WorkEntry;
@@ -10,6 +11,23 @@ pub struct TxIssuer<Tx> {
     transactions: VecDeque<HarnessTransaction<Tx>>,
     completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
     work_sender: Sender<Work<Tx>>,
+    summary: TxIssuerSummary
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct TxIssuerSummary{
+    /// number of txs received at the begining of the reschedule operation
+    num_initial_txs: usize,
+    /// total number of txs that were completely executed, either directly or via retry
+    num_txs_executed: usize,
+    /// number of txs that were retried because of error
+    num_txs_retried: usize,
+    /// total execution time measured from the tx issuer perspective
+    total_exec_time: f64,
+    /// throughput as total txs executed over execution time as txs/s
+    tx_throughput: f64,
+    /// throughput as unique txs executed over execution time as txs/s
+    real_tx_throughput: f64,
 }
 
 impl<Tx> TxIssuer<Tx> 
@@ -19,24 +37,34 @@ where Tx: Send + Sync + 'static {
         work_sender: Sender<Work<Tx>>,
         transactions: VecDeque<HarnessTransaction<Tx>>,
     ) -> Self {
+
+        let num_initial_txs = transactions.len();
+
         Self {
             transactions,
             completed_work_receiver,
             work_sender,
+            summary: TxIssuerSummary { 
+                num_initial_txs, 
+                ..Default::default()
+            }
         }
     }
 
-    pub fn run(mut self) -> std::thread::JoinHandle<()> {
+    pub fn run(mut self) -> std::thread::JoinHandle<TxIssuerSummary> {
         let handle = std::thread::spawn(move || {
-            self.issue_txs();
+            self.issue_txs()
         });
         //return handle
         handle
     }
 
-    fn issue_txs(&mut self) {
+    fn issue_txs(&mut self) -> TxIssuerSummary {
         //issuer will stop once it gets all transactions executed
         let mut num_txs = self.transactions.len();
+
+        let start_time = Instant::now();
+
         loop {
             //multiplex between channels and check first that sends something
             let mut recv_selector = Select::new();
@@ -57,8 +85,14 @@ where Tx: Send + Sync + 'static {
                             if finished_work.completed_entry.is_some() {
                                 info!("Received successfully executed txs");
                                 match finished_work.completed_entry.unwrap() {
-                                    WorkEntry::SingleTx(_) => num_txs -= 1,
-                                    WorkEntry::MultipleTxs(txs) => num_txs -= txs.len()
+                                    WorkEntry::SingleTx(_) => {
+                                        num_txs -= 1;
+                                        self.summary.num_txs_executed += 1;
+                                    }
+                                    WorkEntry::MultipleTxs(txs) => {
+                                        num_txs -= txs.len();
+                                        self.summary.num_txs_executed += txs.len();
+                                    }
                                 };
                             }
 
@@ -68,10 +102,17 @@ where Tx: Send + Sync + 'static {
                                 );
                                 let failed_work = finished_work.failed_entry.unwrap();
                                 match failed_work {
-                                    WorkEntry::SingleTx(tx) => self.transactions.push_back(tx),
+                                    WorkEntry::SingleTx(mut tx) => {
+                                        tx.retry = true;
+                                        self.transactions.push_back(tx);
+                                        self.summary.num_txs_retried += 1;
+                                    }
                                     WorkEntry::MultipleTxs(mut txs) => {
+                                        self.summary.num_txs_retried += txs.len();
                                         while !txs.is_empty() {
-                                            self.transactions.push_back(txs.pop().unwrap());
+                                            let mut tx = txs.pop().unwrap();
+                                            tx.retry = true;
+                                            self.transactions.push_back(tx);
                                         }
                                     }
                                 };
@@ -106,10 +147,10 @@ where Tx: Send + Sync + 'static {
                 match self.work_sender.try_send(Work {
                     entry: WorkEntry::SingleTx(tx),
                 }) {
-                    Ok(_) => info!("Successfully issued another tx to the scheduler"), //consume tx from queue
+                    Ok(_) => info!("Successfully issued another tx to the scheduler"),
                     Err(e) => {
                         match e {
-                            //regardless of dailer we should push back our txs
+                            //when full, we should push back our txs
                             TrySendError::Full(tx) =>{
                                 match tx.entry {
                                     WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
@@ -132,12 +173,20 @@ where Tx: Send + Sync + 'static {
                                     }
                                 };
                                 info!("Scheduler channel got disconnected, ending issuer as well");
-                                return;
+                                break;
                             }
                         }
                     }
                 }
             }
         }
+
+        let end_time = start_time.elapsed().as_secs_f64();
+        self.summary.total_exec_time = end_time;
+        self.summary.num_txs_executed += self.summary.num_txs_retried;
+        self.summary.tx_throughput = self.summary.num_initial_txs as f64 / end_time;
+        self.summary.real_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
+        self.summary.clone()
+
     }
 }

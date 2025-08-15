@@ -3,13 +3,19 @@ use crossbeam_channel::{Receiver,Sender};
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_runtime::bank::LoadAndExecuteTransactionsOutput;
 use solana_sdk::clock::MAX_PROCESSING_AGE;
+use solana_svm::account_loader::LoadedTransaction;
 use solana_svm::account_overrides::AccountOverrides;
+use solana_svm::transaction_execution_result::ExecutedTransaction;
+use solana_svm::transaction_execution_result::TransactionExecutionDetails;
 use tracing::info;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::Work;
 use solana_runtime::bank::Bank;
+use std::collections::hash_set::Iter;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use solana_runtime::transaction_batch::TransactionBatch;
 use solana_runtime::transaction_batch::OwnedOrBorrowed;
 use solana_sdk::transaction::*;
@@ -18,8 +24,9 @@ use solana_svm::transaction_processor::TransactionProcessingConfig;
 use solana_svm::transaction_processor::ExecutionRecordingConfig;
 use solana_timings::ExecuteTimings;
 use std::slice;
+use std::thread;
 use solana_svm::transaction_processing_result::ProcessedTransaction;
-
+use std::time::Instant;
 
 /// Message: [Worker -> Issuer]
 /// Processed transactions.
@@ -32,7 +39,8 @@ pub struct FinishedWork<Tx> {
 pub struct TxExecutor<Tx> {
     work_receiver: Receiver<Work<Tx>>,
     completed_work_sender: Sender<FinishedWork<Tx>>,
-    bank: Arc<Bank>
+    bank: Arc<Bank>,
+    simulate: bool
 }
 
 impl<Tx> TxExecutor<Tx>
@@ -41,8 +49,9 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         work_receiver: Receiver<Work<Tx>>,
         completed_work_sender: Sender<FinishedWork<Tx>>,
         bank: Arc<Bank>,
+        simulate:bool
     ) -> Self {
-        Self {work_receiver, completed_work_sender, bank}
+        Self {work_receiver, completed_work_sender, bank, simulate}
     }
 
     pub fn run(self) -> std::thread::JoinHandle<()>{
@@ -88,11 +97,11 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                             }
                         };
                     },
-                    Err(te) => {
+                    Err(e) => {
                         info!("Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
                             tx.transaction.message_hash(),
                             tx.transaction.signature()
-                            ,te);
+                            ,e);
                         failed_txs.push(tx);
                     }
                 };
@@ -129,8 +138,14 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         let mut transaction_results = vec![];
 
         for tx in harness_transactions {
-            //2-120ms sleep, gaussian distribution with standard deviation of 10ms around 12 ms
-            let (tx_result, tx_time) = self.process_single_transaction(bank, &tx.transaction, &tx.account_overrides);
+            let tx_result;
+            let tx_time;
+            if self.simulate {
+                //2-120ms sleep, gaussian distribution with standard deviation of 10ms around 12 ms
+                (tx_result, tx_time) = self.simulate_transaction(bank, &tx.transaction, tx.simulated_ex_us.unwrap());
+            } else {
+                (tx_result, tx_time) = self.process_single_transaction(bank, &tx.transaction, &tx.account_overrides);
+            }
             transaction_results.extend(tx_result);
             actual_execute_time += tx_time;
         }
@@ -187,6 +202,46 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             .0;
         (processing_results, actual_execute_time)
 
+   }
+
+   fn simulate_transaction(&self, bank: &Arc<Bank>, transaction: &Tx, simulated_ex_time: u64) -> (Vec<Result<ProcessedTransaction>>, u64) {
+        //check account locks before executing
+        let lock_result = bank.try_lock_accounts(slice::from_ref(transaction));
+        let status;
+        if lock_result[0].is_err() {
+            status = Err(TransactionError::AccountInUse);
+        } else {
+            status = Ok(())
+        }
+        let tx_result = status.clone();
+        
+        //let time pass even if we have an account lock in order to count it in the overall execution time
+        let start = Instant::now();
+        
+        //prepare the simulated output
+        let executed_transaction = ExecutedTransaction{
+            loaded_transaction: LoadedTransaction::default(),
+            execution_details: TransactionExecutionDetails{
+                executed_units: simulated_ex_time,
+                status,
+                log_messages: None,
+                inner_instructions: None,
+                return_data: None,
+                accounts_data_len_delta:0
+            },
+            programs_modified_by_tx: HashMap::with_capacity(0)
+        };
+        let processed_transaction = ProcessedTransaction::Executed(Box::new(executed_transaction));
+        
+        //if we caould lock then simulate execution and unlock accounts afterwards
+        if tx_result.is_ok() {
+            thread::sleep(Duration::from_micros(simulated_ex_time)); //Simulate ex time
+            let txs_and_results = slice::from_ref(transaction).iter().zip(vec![&tx_result].into_iter());
+            bank.unlock_accounts(txs_and_results);
+        }
+        
+        let end = start.elapsed();
+        (vec![Ok(processed_transaction)], end.as_micros() as u64)
    }
 
 }

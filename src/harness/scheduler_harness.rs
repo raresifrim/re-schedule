@@ -2,14 +2,14 @@ use std::collections::VecDeque;
 use crate::harness::scheduler::tx_scheduler::{TxScheduler};
 use crate::harness::tx_executor::TxExecutor;
 use crate::{harness::tx_issuer::TxIssuer};
-use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler, TOTAL_TXS, UNIQUE_TXS, RETRY_TXS, SATURATION};
 use crate::utils::config::Config;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-use solana_svm::account_overrides::AccountOverrides;
 use std::sync::Arc;
 use solana_runtime::bank::Bank;
 
-pub struct SchedulerHarness<S> where S:Scheduler
+pub struct SchedulerHarness<S> where
+S: Scheduler + Send + Sync + 'static
 {
     config: Config,
     tx_issuer: TxIssuer<S::Tx>,
@@ -40,7 +40,8 @@ S: Scheduler + Send + Sync + 'static
             tx_executors.push(TxExecutor::new(
                 execute_to_schedule_receive_channels[i as usize].clone(),
                 execute_to_issuer_send_channels[i as usize].clone(),
-                bank.clone()
+                bank.clone(),
+                config.simulate
             ));
         }
 
@@ -53,11 +54,11 @@ S: Scheduler + Send + Sync + 'static
     }
 
 
-    pub fn run(self) {
-        //TODO: Need to compute execution time and return it
+    pub fn run(self)  {
         let mut harness_hdls = vec![];
-        harness_hdls.push(self.tx_issuer.run());
-        harness_hdls.push(self.tx_scheduler.run());
+        //the issuer will return the overall summary of the executiom
+        let issuer_handle = self.tx_issuer.run();
+        let scheduler_handle = self.tx_scheduler.run();
         for ex in self.tx_executors {
             harness_hdls.push(ex.run());
         }
@@ -65,6 +66,22 @@ S: Scheduler + Send + Sync + 'static
         for h in harness_hdls {
             h.join().unwrap();
         }
+
+        let issuer_summary = issuer_handle.join().unwrap();
+        let scheduling_summary = scheduler_handle.join().unwrap();
+
+        println!("\n------ Transaction Issuing Results ------");
+        println!("{:#?}", issuer_summary);
+        println!("\n------ Transaction Scheduling Results ------");
+        for i in 0..(self.config.num_workers as usize){
+            println!("------------- Worker {i} Summary -------------");
+            let worker_summary = scheduling_summary.txs_per_worker.get(&i).unwrap();
+            println!("Total unique txs executed: {}", worker_summary[UNIQUE_TXS]);
+            println!("Total txs executed: {} of which retried: {}", worker_summary[TOTAL_TXS], worker_summary[RETRY_TXS]);
+            println!("Worker saturation: {}%", worker_summary[SATURATION]);
+        }
+        println!("\n------- Transaction Execution Results ------");
+        println!("-------------------------------------------\n");
     }
 }
 

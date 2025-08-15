@@ -8,24 +8,19 @@ use ahash::{HashMap, HashMapExt};
 use bloom_1x::bloom::Bloom1X;
 use bloom_1x::bloom::QueryResult;
 use crossbeam_channel::{Receiver, Sender};
-use solana_cost_model::cost_model::CostModel;
-use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_sdk::transaction::SanitizedTransaction;
-use solana_svm_transaction::svm_message::SVMMessage;
 use std::collections::VecDeque;
-use std::hash::DefaultHasher;
-use std::hash::Hash;
+use ahash::AHasher;
 use std::hash::Hasher;
-use std::sync::Arc;
+use std::hash::Hash;
 use tracing::info;
+use crate::harness::scheduler::scheduler::WorkerId;
 
 //number of tries to fill in the buffer to max capacity
 const NUM_INGEST_RETRIES: usize = 3;
 //maximum number of accounts that a tx can use
 const MAX_NUM_TX_ACCOUNTS:usize = 64;
-pub type WorkerId = usize;
 
 pub struct BloomScheduler {
     num_workers: usize,
@@ -40,7 +35,10 @@ pub struct BloomScheduler {
     /// results from querying the Read and Write filters for each account of a tx
     /// only one set needed as we iterate over each conflicting family sequentially 
     r_query_results: Vec<QueryResult>,
-    w_query_results: Vec<QueryResult>
+    w_query_results: Vec<QueryResult>,
+    /// last block hash seen, used to track when filter flushing should be performed
+    recent_blockhash: u64,
+    scheduling_summary: SchedulingSummary
 }
 
 struct ConflictFamily {
@@ -74,6 +72,17 @@ impl BloomScheduler {
 
         let r_query_results = Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
         let w_query_results= Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
+
+        let mut txs_per_worker = HashMap::with_capacity(num_workers);
+        for i in 0..num_workers {
+            txs_per_worker.insert(i, [0u64; 4]);
+        }
+        let scheduling_summary = SchedulingSummary {
+            txs_per_worker,
+            unique_txs: 0,
+            total_txs: 0,
+        };
+
         Self {
             num_workers,
             conflict_families,
@@ -81,7 +90,9 @@ impl BloomScheduler {
             buffer,
             work_lanes,
             r_query_results,
-            w_query_results
+            w_query_results,
+            recent_blockhash: 0,
+            scheduling_summary
         }
     }
 
@@ -92,14 +103,17 @@ impl BloomScheduler {
         }
     }
 
-    fn schedule_burst(&mut self) -> SchedulingSummary {
+    fn schedule_burst(&mut self) {
         
         let mut num_scheduled = 0;
-        let mut hasher = DefaultHasher::new();
-
+        let mut hasher = AHasher::default();
+        //save blockhash of last tx seen
+        let mut recent_blockhash= 0;
         while let Some(harness_tx) = self.buffer.pop_front() {
             //if we arrived here, we are sure that there is at least a tx inside the buffer
             
+            //save last recent blockhash seen
+            recent_blockhash = harness_tx.blockhash;
             //default to first worker if no conflict is found
             let mut next_worker: usize = 0;
             //get read and write accounts stated in the tx
@@ -108,15 +122,6 @@ impl BloomScheduler {
             //iterate over each conflict family until the current tx account sets intersect with the conflict families
             'main_loop: for (worker_index, cf) in self.conflict_families.iter().enumerate() {
                 let mut and_result = 0;
-
-                //each tx is a blackbox with worst case scenario -> locks imediatly and unlocks after execution
-                //simulate execution with sleep
-                //get utilization percentage of each worker, how much is it used?
-                //(optional)
-                //1: when each write happens
-                //2: when each read happens
-                //3: assuming RoundRobin, how many actual conflicts occur
-                //4: using 1+2, estimate 3
 
                 for write_account in tx_accounts.writable.iter() {
                     write_account.hash(&mut hasher);
@@ -174,11 +179,14 @@ impl BloomScheduler {
         for (worker_index, work) in self.work_lanes.iter().by_ref() {
             info!("Worker {} -> {} transactions", worker_index, work.len());
         }
-        SchedulingSummary {
-            num_scheduled,
-            num_unschedulable_conflicts: 0,
-            num_unschedulable_threads: 0,
+        
+        //flush filters when we get a new block 
+        if recent_blockhash != self.recent_blockhash {
+            self.flush_filters();
+            self.recent_blockhash = recent_blockhash;
         }
+
+        // update summary
     }
 }
 
@@ -188,7 +196,7 @@ impl Scheduler for BloomScheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-    ) -> Result<SchedulingSummary, SchedulerError> {
+    ) -> Result<(), SchedulerError> {
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
         let mut current_buffer_len = 0;
@@ -216,7 +224,7 @@ impl Scheduler for BloomScheduler {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
                             if self.buffer.len() == 0 {
-                                info!("No txs on the channel and no txs buffered locally.")
+                                info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }
                         crossbeam_channel::TryRecvError::Disconnected => {
@@ -248,7 +256,7 @@ impl Scheduler for BloomScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            let scheduling_summary = self.schedule_burst();
+            self.schedule_burst();
 
             //STAGE 3: send the current scheduled txs to the workers
             for worker_index in 0..self.num_workers {
@@ -271,8 +279,11 @@ impl Scheduler for BloomScheduler {
                     None => continue,
                 };
             }
-
-            return Ok(scheduling_summary);
         }
     }
+
+    fn get_summary(&self) -> SchedulingSummary {
+        self.scheduling_summary.clone()
+    }
+
 }

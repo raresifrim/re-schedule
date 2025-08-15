@@ -2,18 +2,20 @@ use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_svm::account_overrides::AccountOverrides;
 use thiserror::Error;
 use crossbeam_channel::{Receiver,Sender};
-use tracing::info;
-use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_sdk::transaction::SanitizedTransaction;
-use solana_cost_model::cost_model::CostModel;
-use std::sync::Arc;
-use solana_runtime::bank::Bank;
-use ahash::{HashMap, HashMapExt};
+use ahash::HashMap;
+
+pub type WorkerId = usize;
 
 pub struct HarnessTransaction<Tx>
 {
     pub transaction: Tx,
-    pub account_overrides: AccountOverrides
+    pub account_overrides: AccountOverrides,
+    //a compressed u64 values of the blockhash
+    pub blockhash:u64,
+    /// if we run in simulation mode we randomly generate an execution time in us
+    pub simulated_ex_us: Option<u64>,
+    ///flag to mark if this tx failed and is retried
+    pub retry: bool
 }
 
 // we should be able to send and receive either one or more txs at once
@@ -38,14 +40,25 @@ pub enum SchedulerError {
     DisconnectedRecvChannel(String),
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+
+//indexes to access the txs_per_worker report vector
+pub const UNIQUE_TXS: usize = 0;
+pub const TOTAL_TXS: usize = 1;
+pub const RETRY_TXS: usize = 2;
+pub const SATURATION: usize = 3;
+
+#[derive(Default, Debug, Clone)]
 pub struct SchedulingSummary {
-    /// Number of transactions scheduled.
-    pub num_scheduled: usize,
-    /// Number of transactions that were not scheduled due to conflicts.
-    pub num_unschedulable_conflicts: usize,
-    /// Number of transactions that were skipped due to thread capacity.
-    pub num_unschedulable_threads: usize,
+    /// 4 types of txs that can be reported in the vector reported:
+    /// 1. unique txs scheduled to each worker
+    /// 2. total txs scheduled to each worker (includes failed txs that are retried)
+    /// 3. duplicate txs that were scheduled to each worker
+    /// 4. saturation per worker
+   pub txs_per_worker: HashMap<WorkerId, [u64; 4]>,
+   /// total unique txs scheduled among all workers
+   pub unique_txs: u64,
+   /// total txs scheduled among all workers
+   pub total_txs: u64
 }
 
 
@@ -59,30 +72,9 @@ pub trait Scheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>]
-    ) -> Result<SchedulingSummary, SchedulerError>{
-        
-        //this implements a dummy sequential scheduler for a single worker
-        match issue_channel.recv() {
-            Ok(tx) => {
-                match execution_channels[0].send(tx) {
-                    Ok(_) => {
-                        //info!("Scheduled transaction to worker");
-                        return Ok(SchedulingSummary{
-                            num_scheduled:1,
-                            num_unschedulable_conflicts:0,
-                            num_unschedulable_threads:0
-                        });
-                    }
-                    Err(e) => return Err(SchedulerError::DisconnectedSendChannel(format!("{:?}", e))) 
-                }
-            },
-            Err(e) => return Err(SchedulerError::DisconnectedRecvChannel(format!("{:?}", e)))
-        }
-    }
+    ) -> Result<(), SchedulerError>;
 
+    /// retrieve scheduling summary
+    fn get_summary(&self) -> SchedulingSummary;
 }
 
-pub struct SequentialScheduler;
-impl Scheduler for SequentialScheduler {
-    type Tx = RuntimeTransaction<SanitizedTransaction>;
-}

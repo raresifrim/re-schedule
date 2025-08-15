@@ -86,10 +86,10 @@ impl Snapshot {
 
         // Create or clear accounts directory
         if accounts_dir.exists() {
-            info!("Clearing accounts directory: {:?}", accounts_dir);
-            fs::remove_dir_all(&accounts_dir).expect("Failed to remove accounts directory");
+            info!("Found exisitng accounts directory at {:?}. Will use this one", accounts_dir);
+        } else {
+            fs::create_dir_all(&accounts_dir).expect("Failed to create accounts directory");
         }
-        fs::create_dir_all(&accounts_dir).expect("Failed to create accounts directory");
 
         let snapshot_dir_name = format!("snapshots-{}", network_str);
         let snapshot_dir = cache_dir.join(snapshot_dir_name);
@@ -123,7 +123,8 @@ pub struct Config {
     pub num_txs_to_process: u64,
     pub batch_size: u64,
     pub slot_duration: u64,
-    pub num_workers: u64
+    pub num_workers: u64,
+    pub simulate: bool
 }
 
 impl Config {
@@ -131,6 +132,7 @@ impl Config {
         json_path: &Path,
         network_type: NetworkType,
         scheduler_type: SchedulerType,
+        simulate:bool,
         // CLI Overrides (passed from main)
         cli_num_txs: Option<u64>,
         cli_batch_size: Option<u64>,
@@ -184,7 +186,8 @@ impl Config {
             num_txs_to_process,
             batch_size,
             slot_duration,
-            num_workers
+            num_workers,
+            simulate
         })
     }
 

@@ -1,17 +1,20 @@
-use crate::harness::scheduler::scheduler::SchedulingSummary;
-use crate::harness::scheduler::scheduler::SchedulerError;
-use crossbeam_channel::{Receiver,Sender};
-use tracing::info;
-use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
-use solana_sdk::transaction::SanitizedTransaction;
-use solana_cost_model::cost_model::CostModel;
-use std::sync::Arc;
-use solana_runtime::bank::Bank;
-use ahash::{HashMap, HashMapExt};
-use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
+use crate::harness::scheduler::scheduler::RETRY_TXS;
+use crate::harness::scheduler::scheduler::Scheduler;
+use crate::harness::scheduler::scheduler::SchedulerError;
+use crate::harness::scheduler::scheduler::SchedulingSummary;
+use crate::harness::scheduler::scheduler::TOTAL_TXS;
+use crate::harness::scheduler::scheduler::UNIQUE_TXS;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
+use ahash::{HashMap, HashMapExt};
+use crossbeam_channel::{Receiver, Sender};
+use solana_cost_model::cost_model::CostModel;
+use solana_runtime::bank::Bank;
+use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
+use solana_sdk::transaction::SanitizedTransaction;
+use std::sync::Arc;
+use tracing::info;
 
 pub struct RoundRobinScheduler {
     bank: Arc<Bank>,
@@ -25,6 +28,7 @@ pub struct RoundRobinScheduler {
     >,
     cu_quant: u64,
     last_worker: usize,
+    scheduling_summary: SchedulingSummary,
 }
 
 impl RoundRobinScheduler {
@@ -33,12 +37,22 @@ impl RoundRobinScheduler {
         for i in 0..num_workers {
             rr_distribution.insert(i, (cu_quant, vec![]));
         }
+        let mut txs_per_worker = HashMap::with_capacity(num_workers);
+        for i in 0..num_workers {
+            txs_per_worker.insert(i, [0u64; 4]);
+        }
+        let scheduling_summary = SchedulingSummary {
+            txs_per_worker,
+            unique_txs: 0,
+            total_txs: 0,
+        };
         Self {
             num_workers,
             cu_quant,
             rr_distribution,
             bank,
             last_worker: 0,
+            scheduling_summary,
         }
     }
 }
@@ -49,8 +63,7 @@ impl Scheduler for RoundRobinScheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-    ) -> Result<SchedulingSummary, SchedulerError> {
-        //this implements a dummy sequential scheduler for a single worker
+    ) -> Result<(), SchedulerError> {
         loop {
             match issue_channel.try_recv() {
                 Ok(tx) => {
@@ -61,13 +74,30 @@ impl Scheduler for RoundRobinScheduler {
                                 CostModel::calculate_cost(&tx.transaction, &self.bank.feature_set)
                                     .sum();
                             let current_entry = self.rr_distribution.entry(self.last_worker);
-                            current_entry.and_modify(|v| {
-                                v.1.push(tx);
-                                v.0 = v.0.saturating_sub(cost_of_tx);
-                                if v.0 == 0 {
-                                    self.last_worker = (self.last_worker + 1) % self.num_workers;
-                                }
-                            });
+                            current_entry.and_modify(
+                                |v| {
+                                    // TODO: Ask Alex how to make this clousure re-usable?
+                                    let txs_per_worker = self
+                                        .scheduling_summary
+                                        .txs_per_worker
+                                        .get_mut(&self.last_worker)
+                                        .unwrap();
+                                    if tx.retry {
+                                        txs_per_worker[RETRY_TXS] += 1;
+                                    } else {
+                                        txs_per_worker[UNIQUE_TXS] += 1;
+                                        self.scheduling_summary.unique_txs += 1;
+                                    }
+                                    txs_per_worker[TOTAL_TXS] += 1;
+                                    self.scheduling_summary.total_txs += 1;
+                                    v.1.push(tx);
+                                    v.0 = v.0.saturating_sub(cost_of_tx);
+                                    if v.0 == 0 {
+                                        self.last_worker =
+                                            (self.last_worker + 1) % self.num_workers;
+                                    }
+                                },
+                            );
                         }
                         WorkEntry::MultipleTxs(txs) => {
                             //quite naive way of balancing multiple txs to the workers
@@ -80,6 +110,19 @@ impl Scheduler for RoundRobinScheduler {
                                 .sum();
                                 let current_entry = self.rr_distribution.entry(self.last_worker);
                                 current_entry.and_modify(|v| {
+                                    let txs_per_worker = self
+                                        .scheduling_summary
+                                        .txs_per_worker
+                                        .get_mut(&self.last_worker)
+                                        .unwrap();
+                                    if tx.retry {
+                                        txs_per_worker[RETRY_TXS] += 1;
+                                    } else {
+                                        txs_per_worker[UNIQUE_TXS] += 1;
+                                        self.scheduling_summary.unique_txs += 1;
+                                    }
+                                    txs_per_worker[TOTAL_TXS] += 1;
+                                    self.scheduling_summary.total_txs += 1;
                                     v.1.push(tx);
                                     v.0 = v.0.saturating_sub(cost_of_tx);
                                     if v.0 == 0 {
@@ -126,12 +169,6 @@ impl Scheduler for RoundRobinScheduler {
                     for index in used_workers {
                         self.rr_distribution.insert(index, (self.cu_quant, vec![]));
                     }
-
-                    return Ok(SchedulingSummary {
-                        num_scheduled,
-                        num_unschedulable_conflicts: 0,
-                        num_unschedulable_threads: 0,
-                    });
                 }
 
                 //error might be actualy just empty or a real error like disconnected
@@ -152,7 +189,10 @@ impl Scheduler for RoundRobinScheduler {
                                 }) {
                                     Ok(_) => {
                                         num_scheduled += num_txs;
-                                        info!("Schedued {} txs to worker {}", num_scheduled, worker_index);
+                                        info!(
+                                            "Schedued {} txs to worker {}",
+                                            num_scheduled, worker_index
+                                        );
                                     }
                                     Err(_) => {
                                         //for the moment we stop the entire execution if we see that one worker is not responding anymore
@@ -173,12 +213,6 @@ impl Scheduler for RoundRobinScheduler {
                                 self.rr_distribution.insert(index, (self.cu_quant, vec![]));
                             }
                             self.last_worker = 0;
-                            //info!("No more txs received, will try another round later...");
-                            return Ok(SchedulingSummary {
-                                num_scheduled,
-                                num_unschedulable_conflicts: 0,
-                                num_unschedulable_threads: 0,
-                            });
                         }
                         crossbeam_channel::TryRecvError::Disconnected => {
                             //if disconnected we exit as there is no tx issuer to give us work
@@ -190,5 +224,9 @@ impl Scheduler for RoundRobinScheduler {
                 }
             }
         }
+    }
+
+    fn get_summary(&self) -> SchedulingSummary {
+        self.scheduling_summary.clone()
     }
 }

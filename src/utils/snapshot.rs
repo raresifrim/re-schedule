@@ -2,9 +2,9 @@ use anyhow::Context;
 use solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS;
 use solana_pubkey::Pubkey;
 use solana_runtime::{
-    bank::Bank, bank_forks::BankForks, runtime_config::RuntimeConfig, snapshot_archive_info::FullSnapshotArchiveInfo, snapshot_bank_utils::bank_from_snapshot_archives
+    bank::Bank, bank_forks::{self, BankForks}, epoch_stakes::EpochStakes, runtime_config::RuntimeConfig, snapshot_archive_info::FullSnapshotArchiveInfo, snapshot_bank_utils::bank_from_snapshot_archives
 };
-use solana_sdk::genesis_config::GenesisConfig;
+use solana_sdk::{clock::Epoch, genesis_config::GenesisConfig};
 use std::sync::{atomic::AtomicBool, Arc};
 use tracing::info;
 use std::sync::RwLock;
@@ -15,10 +15,22 @@ use super::config::Snapshot;
 pub fn load_bank_from_snapshot(
     snapshot: &Snapshot,
     genesis: &GenesisConfig,
+    simulate: bool
 ) -> anyhow::Result<(Arc<solana_runtime::bank::Bank>,Arc<RwLock<BankForks>>)> {
+
+    if simulate {
+        info!("Simulation mode enabled, creating a mock bank for execution.");
+        let (mock_bank, bank_forks) = Bank::new_with_bank_forks_for_tests(genesis);
+        return Ok((mock_bank, bank_forks));
+    }
+
     let snapshot_path = snapshot.path.clone();
     let accounts_dir = snapshot.accounts_dir.clone();
     let snapshot_dir = snapshot.snapshot_dir.clone();
+
+    if !snapshot_path.exists() {
+        panic!("Snapshot archive path provided in the config.json does not exist. Please update it with an exisitng location or download a new snapshot using the download-snapshot command");   
+    }
 
     let full_snapshot_archive = FullSnapshotArchiveInfo::new_from_path(snapshot_path)
         .context("Failed to load snapshot archive info")?;
