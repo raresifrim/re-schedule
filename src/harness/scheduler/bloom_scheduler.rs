@@ -4,6 +4,9 @@ use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
+use crate::harness::scheduler::scheduler::RETRY_TXS;
+use crate::harness::scheduler::scheduler::TOTAL_TXS;
+use crate::harness::scheduler::scheduler::UNIQUE_TXS;
 use ahash::{HashMap, HashMapExt};
 use bloom_1x::bloom::Bloom1X;
 use bloom_1x::bloom::QueryResult;
@@ -16,9 +19,13 @@ use std::hash::Hasher;
 use std::hash::Hash;
 use tracing::info;
 use crate::harness::scheduler::scheduler::WorkerId;
+use itertools::{
+    Itertools,
+    EitherOrBoth::*,
+};
 
 //number of tries to fill in the buffer to max capacity
-const NUM_INGEST_RETRIES: usize = 3;
+const NUM_INGEST_RETRIES: usize = 5;
 //maximum number of accounts that a tx can use
 const MAX_NUM_TX_ACCOUNTS:usize = 64;
 
@@ -36,10 +43,13 @@ pub struct BloomScheduler {
     /// only one set needed as we iterate over each conflicting family sequentially 
     r_query_results: Vec<QueryResult>,
     w_query_results: Vec<QueryResult>,
+    /// local filter used to get query results for accounts of current processed tx
+    local_filter: Bloom1X,
     /// last block hash seen, used to track when filter flushing should be performed
     recent_blockhash: u64,
     scheduling_summary: SchedulingSummary
 }
+
 
 struct ConflictFamily {
     read_filter: Bloom1X,
@@ -63,6 +73,7 @@ impl BloomScheduler {
             };
             conflict_families.push(conflict_family);
         }
+        let local_filter = Bloom1X::new(k, l, w, 96);
 
         let buffer =
             VecDeque::<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>::with_capacity(
@@ -91,6 +102,7 @@ impl BloomScheduler {
             work_lanes,
             r_query_results,
             w_query_results,
+            local_filter,
             recent_blockhash: 0,
             scheduling_summary
         }
@@ -103,67 +115,82 @@ impl BloomScheduler {
         }
     }
 
-    fn schedule_burst(&mut self) {
-        
-        let mut num_scheduled = 0;
-        let mut hasher = AHasher::default();
-        //save blockhash of last tx seen
-        let mut recent_blockhash= 0;
+    fn schedule_burst(&mut self) {        
+        //save worker that should receive the scheduled work
+        let mut next_worker: usize = self.num_workers;
         while let Some(harness_tx) = self.buffer.pop_front() {
             //if we arrived here, we are sure that there is at least a tx inside the buffer
-            
-            //save last recent blockhash seen
-            recent_blockhash = harness_tx.blockhash;
-            //default to first worker if no conflict is found
-            let mut next_worker: usize = 0;
             //get read and write accounts stated in the tx
             let tx_accounts = harness_tx.transaction.get_account_locks_unchecked();
-
-            //iterate over each conflict family until the current tx account sets intersect with the conflict families
-            'main_loop: for (worker_index, cf) in self.conflict_families.iter().enumerate() {
-                let mut and_result = 0;
-
-                for write_account in tx_accounts.writable.iter() {
-                    write_account.hash(&mut hasher);
-                    let index = hasher.finish();
-                    let write_filter_result = cf.write_filter.query_u64_with_result(index);
-                    let read_filter_result = cf.read_filter.query_u64_with_result(index);
-                    and_result |= read_filter_result.and_result | write_filter_result.and_result;
-                    self.w_query_results.push(write_filter_result);
-                }
-
-                for read_account in tx_accounts.readonly.iter() {
-                    read_account.hash(&mut hasher);
-                    let index = hasher.finish();
-                    let write_filter_result = cf.write_filter.query_u64_with_result(index);
-                    let read_filter_result = cf.read_filter.query_u64_with_result(index);
-                    and_result |= write_filter_result.and_result;
-                    self.r_query_results.push(read_filter_result);
-                }
-
-                if and_result == 1 {
-                    //found conflict within current family
-                    next_worker = worker_index;
-                    break 'main_loop;
-                }
-
-                //if no conflict found here, clear and move forward
-                self.r_query_results.clear();
-                self.w_query_results.clear();
+            for write_account in tx_accounts.writable.iter() {
+                // hasher finish does not reset the internal state so we must recreate the hasher each time
+                let mut hasher = AHasher::default();
+                hasher.write(write_account.as_array());
+                let index = hasher.finish();
+                let write_filter_result = self.local_filter.query_u64_with_result(index);
+                self.w_query_results.push(write_filter_result);
             }
 
-            while let Some(read_result) = self.r_query_results.pop(){
+            for read_account in tx_accounts.readonly.iter() {
+                let mut hasher = AHasher::default();
+                hasher.write(read_account.as_array());
+                let index = hasher.finish();
+                let read_filter_result = self.local_filter.query_u64_with_result(index);
+                self.r_query_results.push(read_filter_result);
+            }
+
+            let mut and_result = 0;
+            'main_loop: for pair in self.w_query_results.iter().zip_longest(self.r_query_results.iter()) {
+                //iterate over each conflict family until the current tx account sets intersect with the conflict families
+                for (worker_index, cf) in self.conflict_families.iter().enumerate() {
+                    match pair {
+                        Both(w, r) => {
+                            let waw_hazard = cf.write_filter.query_by_result(w);
+                            let war_hazard = cf.read_filter.query_by_result(w);
+                            let raw_hazard = cf.write_filter.query_by_result(r);
+                            and_result |= war_hazard | waw_hazard | raw_hazard;
+                        }
+                        Left(w) => {
+                            let waw_hazard = cf.write_filter.query_by_result(w);
+                            let war_hazard = cf.read_filter.query_by_result(w);
+                            and_result |= war_hazard | waw_hazard;
+                        },
+                        Right(r) => {
+                            let raw_hazard = cf.write_filter.query_by_result(r);
+                            and_result |= raw_hazard;
+                        },
+                    }
+                    if and_result == 1 {
+                        //found conflict within current family
+                        next_worker = worker_index;
+                        break 'main_loop;
+                    }
+                }
+            }
+
+            
+            if and_result == 0 {
+                //if no filter had a match on the provided account then any worker can take work 
+                //in this case employ a round-robin scheduling where we balance the work
+                next_worker = (next_worker + 1) % self.num_workers;
+            }
+
+            self.r_query_results.iter().for_each(|read_result| {
                 self.conflict_families[next_worker]
                     .read_filter
                     .update_filter(read_result);
-            }
-            
-            while let Some(write_result) = self.w_query_results.pop() {
+            });
+
+            self.w_query_results.iter().for_each(|write_result|{
                 self.conflict_families[next_worker]
                     .write_filter
                     .update_filter(write_result);
-            }
+            });
 
+            self.r_query_results.clear();
+            self.w_query_results.clear();
+            
+            let retry = harness_tx.retry;
             let mut v = vec![harness_tx];
             self.work_lanes
                 .entry(next_worker)
@@ -171,22 +198,19 @@ impl BloomScheduler {
                     f.append(&mut v);
                 })
                 .or_insert(v);
-            num_scheduled += 1;
+
+            let report = self.scheduling_summary.txs_per_worker.get_mut(&next_worker).unwrap();
+            report[TOTAL_TXS] += 1;
+            if retry {
+                report[RETRY_TXS] += 1;
+            } else {
+                report[UNIQUE_TXS] += 1;
+                self.scheduling_summary.unique_txs += 1;
+            }
+            self.scheduling_summary.total_txs += 1;
 
         }
         
-        info!("Scheduling summary per worker:");
-        for (worker_index, work) in self.work_lanes.iter().by_ref() {
-            info!("Worker {} -> {} transactions", worker_index, work.len());
-        }
-        
-        //flush filters when we get a new block 
-        if recent_blockhash != self.recent_blockhash {
-            self.flush_filters();
-            self.recent_blockhash = recent_blockhash;
-        }
-
-        // update summary
     }
 }
 
@@ -224,7 +248,7 @@ impl Scheduler for BloomScheduler {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
                             if self.buffer.len() == 0 {
-                                info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
+                                //info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }
                         crossbeam_channel::TryRecvError::Disconnected => {
@@ -250,13 +274,14 @@ impl Scheduler for BloomScheduler {
                     //if we still have same buffered txs subtract the number or retries
                     num_retries -= 1;
                 }
-                if num_retries != 0 {
+                if num_retries > 0 {
                     //try to get more txs before scheduling
                     continue;
                 }
             }
             //once we got here, we know we can start scheduling the txs
             self.schedule_burst();
+            num_retries = NUM_INGEST_RETRIES;
 
             //STAGE 3: send the current scheduled txs to the workers
             for worker_index in 0..self.num_workers {

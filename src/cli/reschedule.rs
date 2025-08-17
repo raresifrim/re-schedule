@@ -61,7 +61,7 @@ pub struct RescheduleArgs {
     pub transactions: Option<u64>,
 
     /// Scheduler type
-    #[arg(long, value_enum, default_value = "sequential")]
+    #[arg(long, value_enum, default_value = "bloom")]
     pub scheduler_type: Option<SchedulerType>,
 
     /// Scheduler transaction batch size

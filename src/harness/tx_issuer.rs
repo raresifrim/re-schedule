@@ -24,10 +24,10 @@ pub struct TxIssuerSummary{
     num_txs_retried: usize,
     /// total execution time measured from the tx issuer perspective
     total_exec_time: f64,
-    /// throughput as total txs executed over execution time as txs/s
-    tx_throughput: f64,
     /// throughput as unique txs executed over execution time as txs/s
     real_tx_throughput: f64,
+    /// throughput as total amount txs executed over execution time as txs/s
+    theoretical_tx_throughput: f64,
 }
 
 impl<Tx> TxIssuer<Tx> 
@@ -184,8 +184,8 @@ where Tx: Send + Sync + 'static {
         let end_time = start_time.elapsed().as_secs_f64();
         self.summary.total_exec_time = end_time;
         self.summary.num_txs_executed += self.summary.num_txs_retried;
-        self.summary.tx_throughput = self.summary.num_initial_txs as f64 / end_time;
-        self.summary.real_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
+        self.summary.real_tx_throughput = self.summary.num_initial_txs as f64 / end_time;
+        self.summary.theoretical_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
         self.summary.clone()
 
     }

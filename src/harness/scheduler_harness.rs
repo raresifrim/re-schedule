@@ -70,8 +70,10 @@ S: Scheduler + Send + Sync + 'static
         let issuer_summary = issuer_handle.join().unwrap();
         let scheduling_summary = scheduler_handle.join().unwrap();
 
-        println!("\n------ Transaction Issuing Results ------");
+        println!("\n-------- Transaction Issuing Results -------");
         println!("{:#?}", issuer_summary);
+        println!("-------------------------------------------\n");
+        
         println!("\n------ Transaction Scheduling Results ------");
         for i in 0..(self.config.num_workers as usize){
             println!("------------- Worker {i} Summary -------------");
@@ -80,6 +82,8 @@ S: Scheduler + Send + Sync + 'static
             println!("Total txs executed: {} of which retried: {}", worker_summary[TOTAL_TXS], worker_summary[RETRY_TXS]);
             println!("Worker saturation: {}%", worker_summary[SATURATION]);
         }
+        println!("-------------------------------------------\n");
+        
         println!("\n------- Transaction Execution Results ------");
         println!("-------------------------------------------\n");
     }

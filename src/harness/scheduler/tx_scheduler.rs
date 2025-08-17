@@ -3,9 +3,8 @@ use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
 
 #[derive(Debug)]
-pub struct TxScheduler<S>
-where
-    S: Scheduler + Send + Sync + 'static,
+pub struct TxScheduler<S> where
+S: Scheduler + Send + Sync + 'static,
 {
     /// scheduler strategy used for the tx scheduler
     scheduler: S,
@@ -15,9 +14,8 @@ where
     work_executors: Vec<Sender<Work<S::Tx>>>,
 }
 
-impl<S> TxScheduler<S>
-where
-    S: Scheduler + Send + Sync + 'static,
+impl<S> TxScheduler<S> where
+S: Scheduler + Send + Sync + 'static,
 {
     pub fn new(
         scheduler: S,
