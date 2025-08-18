@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::harness::scheduler::tx_scheduler::{TxScheduler};
-use crate::harness::tx_executor::TxExecutor;
+use crate::harness::tx_executor::{SharedAccountLocks, TxExecutor};
 use crate::{harness::tx_issuer::TxIssuer};
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler, TOTAL_TXS, UNIQUE_TXS, RETRY_TXS, SATURATION};
 use crate::utils::config::Config;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use solana_runtime::bank::Bank;
 
 pub struct SchedulerHarness<S> where
@@ -38,10 +39,11 @@ S: Scheduler + Send + Sync + 'static
         let mut tx_executors = vec![];
         for i in 0..config.num_workers {
             tx_executors.push(TxExecutor::new(
+                i as usize,
                 execute_to_schedule_receive_channels[i as usize].clone(),
                 execute_to_issuer_send_channels[i as usize].clone(),
                 bank.clone(),
-                config.simulate
+                config.simulate,
             ));
         }
 
@@ -59,8 +61,14 @@ S: Scheduler + Send + Sync + 'static
         //the issuer will return the overall summary of the executiom
         let issuer_handle = self.tx_issuer.run();
         let scheduler_handle = self.tx_scheduler.run();
+        
+        let account_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
         for ex in self.tx_executors {
-            harness_hdls.push(ex.run());
+            if self.config.simulate {
+                harness_hdls.push(ex.run(Some(Arc::clone(&account_locks))));
+            } else {
+                harness_hdls.push(ex.run(None));
+            }
         }
 
         for h in harness_hdls {

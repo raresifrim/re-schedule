@@ -105,6 +105,24 @@ impl ThreadAwareAccountLocks {
         Ok(thread_id)
     }
 
+    pub fn check_accounts<'a>(
+        &self,
+        write_account_locks: impl Iterator<Item = &'a Pubkey> + Clone,
+        read_account_locks: impl Iterator<Item = &'a Pubkey> + Clone,
+        allowed_threads: ThreadSet,
+        thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
+    ) -> Result<ThreadId, TryLockError> {
+        let schedulable_threads = self
+            .accounts_schedulable_threads(write_account_locks.clone(), read_account_locks.clone())
+            .ok_or(TryLockError::MultipleConflicts)?;
+        let schedulable_threads = schedulable_threads & allowed_threads;
+        if schedulable_threads.is_empty() {
+            return Err(TryLockError::ThreadNotAllowed);
+        }
+        let thread_id = thread_selector(schedulable_threads);
+        Ok(thread_id)
+    }
+
     /// Unlocks the accounts for the given thread.
     pub fn unlock_accounts<'a>(
         &mut self,
@@ -202,7 +220,7 @@ impl ThreadAwareAccountLocks {
     }
 
     /// Add locks for all writable and readable accounts on `thread_id`.
-    fn lock_accounts<'a>(
+    pub fn lock_accounts<'a>(
         &mut self,
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,

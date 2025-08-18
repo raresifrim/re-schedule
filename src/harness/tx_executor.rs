@@ -1,5 +1,6 @@
 use anyhow::Context;
 use crossbeam_channel::{Receiver,Sender};
+use itertools::Itertools;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use solana_runtime::bank::LoadAndExecuteTransactionsOutput;
 use solana_sdk::clock::MAX_PROCESSING_AGE;
@@ -14,7 +15,11 @@ use crate::harness::scheduler::scheduler::Work;
 use solana_runtime::bank::Bank;
 use std::collections::hash_set::Iter;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Duration;
 use solana_runtime::transaction_batch::TransactionBatch;
 use solana_runtime::transaction_batch::OwnedOrBorrowed;
@@ -27,7 +32,7 @@ use std::slice;
 use std::thread;
 use solana_svm::transaction_processing_result::ProcessedTransaction;
 use std::time::Instant;
-
+use crate::harness::scheduler::thread_aware_account_locks::ThreadId;
 /// Message: [Worker -> Issuer]
 /// Processed transactions.
 pub struct FinishedWork<Tx> {
@@ -37,33 +42,49 @@ pub struct FinishedWork<Tx> {
 
 #[derive(Debug)]
 pub struct TxExecutor<Tx> {
+    thread_id: ThreadId,
+    //channel to receive txs from TxScheduler
     work_receiver: Receiver<Work<Tx>>,
+    //channel to send txs and results of execution back to TxIssuer
     completed_work_sender: Sender<FinishedWork<Tx>>,
     bank: Arc<Bank>,
-    simulate: bool
+    //simulate execution time provided inside tx instead of actually executing it
+    simulate: bool,
 }
 
 impl<Tx> TxExecutor<Tx>
 where Tx: TransactionWithMeta + Send + Sync + 'static {
     pub fn new(
+        thread_id: ThreadId,
         work_receiver: Receiver<Work<Tx>>,
         completed_work_sender: Sender<FinishedWork<Tx>>,
         bank: Arc<Bank>,
-        simulate:bool
+        simulate:bool,
     ) -> Self {
-        Self {work_receiver, completed_work_sender, bank, simulate}
+        Self {
+            thread_id,
+            work_receiver,
+            completed_work_sender,
+            bank,
+            simulate
+        }
     }
 
-    pub fn run(self) -> std::thread::JoinHandle<()>{
+    pub fn run(self, account_locks: Option<Arc<Mutex<SharedAccountLocks>>>) -> std::thread::JoinHandle<()>{
         let handle = std::thread::spawn(move || {
             info!("Startng worker thread");
-            
-            self.execute_txs();
+            if self.simulate {
+                self.execute_txs(account_locks.unwrap());
+            } else {
+                //create a dummy lock that will not be used for real execution
+                let empty_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
+                self.execute_txs(empty_locks);
+            }
         });
         //return handle
         handle
     }
-    fn execute_txs(&self) {
+    fn execute_txs(&self, account_locks: Arc<Mutex<SharedAccountLocks>>) {
         while let Ok(work) = self.work_receiver.recv() {
             info!("Received new batch of work...");
 
@@ -73,7 +94,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
                 WorkEntry::MultipleTxs(txs) => harness_transactions = txs
             }
             
-            let processed_output = self.process_transactions_one_by_one(&self.bank, &harness_transactions);
+            let processed_output = self.process_transactions_one_by_one(&harness_transactions, &account_locks);
             
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
@@ -132,7 +153,7 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         }
     }
 
-    fn process_transactions_one_by_one(&self,  bank: &Arc<Bank>,  harness_transactions: &[HarnessTransaction<Tx>]) -> Vec<Result<ProcessedTransaction>> {
+    fn process_transactions_one_by_one(&self, harness_transactions: &[HarnessTransaction<Tx>], account_locks: &Arc<Mutex<SharedAccountLocks>>) -> Vec<Result<ProcessedTransaction>> {
         
         let mut actual_execute_time: u64 = 0;
         let mut transaction_results = vec![];
@@ -141,10 +162,9 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
             let tx_result;
             let tx_time;
             if self.simulate {
-                //2-120ms sleep, gaussian distribution with standard deviation of 10ms around 12 ms
-                (tx_result, tx_time) = self.simulate_transaction(bank, &tx.transaction, tx.simulated_ex_us.unwrap());
+                (tx_result, tx_time) = self.simulate_transaction( &tx.transaction, tx.simulated_ex_us.unwrap(), account_locks);
             } else {
-                (tx_result, tx_time) = self.process_single_transaction(bank, &tx.transaction, &tx.account_overrides);
+                (tx_result, tx_time) = self.process_single_transaction(&tx.transaction, &tx.account_overrides);
             }
             transaction_results.extend(tx_result);
             actual_execute_time += tx_time;
@@ -156,26 +176,26 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         transaction_results
     }
 
-   fn process_single_transaction(&self,  bank: &Arc<Bank>, transaction: &Tx, account_override: &AccountOverrides) -> (Vec<Result<ProcessedTransaction>>, u64) {
+   fn process_single_transaction(&self, transaction: &Tx, account_override: &AccountOverrides) -> (Vec<Result<ProcessedTransaction>>, u64) {
 
         let batch = TransactionBatch::new(
-            bank.try_lock_accounts_with_results(slice::from_ref(transaction), slice::from_ref(transaction).into_iter().map(|_| Ok(()))),
-            bank,
+            self.bank.try_lock_accounts_with_results(slice::from_ref(transaction), slice::from_ref(transaction).into_iter().map(|_| Ok(()))),
+            &self.bank,
             OwnedOrBorrowed::Borrowed(slice::from_ref(transaction)),
         );
         
         info!("Processing tx with signature and message hash: {:?}, {:?}", transaction.signature(), transaction.message_hash());
 
         //prepare bank for current tx as it might be older than the current snapshot
-        bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
-        bank.register_recent_blockhash_for_test(transaction.recent_blockhash(), None);
+        self.bank.load_addresses_from_ref(transaction.message_address_table_lookups()).context("Failed to load addresses from ALT").unwrap();
+        self.bank.register_recent_blockhash_for_test(transaction.recent_blockhash(), None);
         
         // TODO: Check after line 353 in the transaction_processor.rs 
         let mut timings = ExecuteTimings::default();
         let LoadAndExecuteTransactionsOutput {
             processing_results,
             ..
-        } = bank.load_and_execute_transactions(
+        } = self.bank.load_and_execute_transactions(
             &batch,
             MAX_PROCESSING_AGE,
             &mut timings,
@@ -204,19 +224,40 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
 
    }
 
-   fn simulate_transaction(&self, bank: &Arc<Bank>, transaction: &Tx, simulated_ex_time: u64) -> (Vec<Result<ProcessedTransaction>>, u64) {
-        //check account locks before executing
-        let lock_result = bank.try_lock_accounts(slice::from_ref(transaction));
-        let status;
-        if lock_result[0].is_err() {
-            status = Err(TransactionError::AccountInUse);
-        } else {
-            status = Ok(())
-        }
-        let tx_result = status.clone();
-        
+   fn simulate_transaction(&self, transaction: &Tx, simulated_ex_time: u64, account_locks: &Arc<Mutex<SharedAccountLocks>>) -> (Vec<Result<ProcessedTransaction>>, u64) {
         //let time pass even if we have an account lock in order to count it in the overall execution time
         let start = Instant::now();
+        
+        let account_keys = transaction.account_keys();
+        let write_accounts = account_keys.iter().enumerate().filter_map(|(index, key)| {
+            transaction.is_writable(index).then_some(key)
+        }).collect_vec();
+        let read_accounts = account_keys.iter().enumerate().filter_map(|(index, key)| {
+            (!transaction.is_writable(index)).then_some(key)
+        }).collect_vec();
+        
+        let lock_result;
+        {
+            let mut mutex = account_locks.lock().unwrap();
+            lock_result = mutex.try_lock_tx_accounts(&write_accounts, &read_accounts);
+        }
+
+        let status = match lock_result{
+            Ok(()) => {
+                info!("Thread {} can lock current tx and start executing it", self.thread_id);
+                thread::sleep(Duration::from_micros(simulated_ex_time)); //Simulate ex time
+                let mut mutex = account_locks.lock().unwrap();
+                mutex.unlock_tx_accounts(&write_accounts, &read_accounts);
+                Ok(())
+            },
+            Err(TryLockError::MultipleConflicts) => {
+                info!("Got conflict: TryLockError::MultipleConflicts");
+                Err(TransactionError::AccountInUse)
+            }
+            Err(TryLockError::ThreadNotAllowed) => {
+                panic!("Got conflict: TryLockError::ThreadNotAllowed"); //should not happen
+            }
+        };
         
         //prepare the simulated output
         let executed_transaction = ExecutedTransaction{
@@ -233,15 +274,140 @@ where Tx: TransactionWithMeta + Send + Sync + 'static {
         };
         let processed_transaction = ProcessedTransaction::Executed(Box::new(executed_transaction));
         
-        //if we caould lock then simulate execution and unlock accounts afterwards
-        if tx_result.is_ok() {
-            thread::sleep(Duration::from_micros(simulated_ex_time)); //Simulate ex time
-            let txs_and_results = slice::from_ref(transaction).iter().zip(vec![&tx_result].into_iter());
-            bank.unlock_accounts(txs_and_results);
-        }
-        
+      
         let end = start.elapsed();
         (vec![Ok(processed_transaction)], end.as_micros() as u64)
    }
+
+}
+
+
+//////////////////////////////////////// Suport Structures ////////////////////////////////////////
+
+use ahash::AHashMap;
+use solana_pubkey::Pubkey;
+use crate::harness::scheduler::thread_aware_account_locks::TryLockError;
+
+pub struct SharedAccountLocks (AHashMap<Pubkey, AtomicAccountLock>);
+
+#[derive(Debug)]
+struct AtomicAccountLock {
+    lock_type: AtomicU8,
+    lock_counter: AtomicU64
+}
+
+const NO_LOCK: u8 = 0;
+const READ_LOCK: u8 = 2;
+const WRITE_LOCK: u8 = 1;
+
+impl Default for AtomicAccountLock {
+    fn default() -> Self { 
+        Self { lock_type: AtomicU8::new(NO_LOCK), lock_counter: AtomicU64::new(0) }
+     }
+}
+
+impl SharedAccountLocks {
+    pub fn new() -> Self {
+        SharedAccountLocks(AHashMap::new())
+    }
+
+    pub fn try_lock_tx_accounts(
+        &mut self,
+        write_accounts: &[&Pubkey],
+        read_accounts:&[&Pubkey]
+    ) -> anyhow::Result<(), TryLockError> {
+        match  self.check_tx_accounts(write_accounts, read_accounts){
+            Ok(_) => {
+                self.lock_tx_accounts(write_accounts, read_accounts);
+                Ok(())
+            },
+            Err(err) => Err(err)
+        }
+    }
+
+    pub fn check_tx_accounts(
+        &self,
+        write_accounts: &[&Pubkey],
+        read_accounts:&[&Pubkey]
+    ) -> anyhow::Result<(), TryLockError> {
+        for account in write_accounts {
+            match self.0.get(account) {
+                Some(value) => {
+                    if value.lock_type.load(std::sync::atomic::Ordering::SeqCst) != NO_LOCK {
+                        return Err(TryLockError::MultipleConflicts);
+                    }
+                },
+                None => {}
+            }
+        }
+
+       for account in read_accounts {
+            match self.0.get(account) {
+                Some(value) => {
+                    if value.lock_type.load(std::sync::atomic::Ordering::SeqCst) == WRITE_LOCK {
+                        return Err(TryLockError::MultipleConflicts);
+                    }
+                },
+                None => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn lock_tx_accounts(
+        &mut self,
+        write_accounts: &[&Pubkey],
+        read_accounts:&[&Pubkey]
+    ) {
+        for account in write_accounts {
+            self.0.entry(**account)
+            .and_modify(|a|{
+                a.lock_type.store(WRITE_LOCK, std::sync::atomic::Ordering::SeqCst);
+                a.lock_counter.store(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(WRITE_LOCK), lock_counter: AtomicU64::new(1) });
+        }
+
+       for account in read_accounts {
+            self.0.entry(**account)
+            .and_modify(|a|{
+                let previous_counter = a.lock_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if previous_counter == 0{
+                    a.lock_type.store(READ_LOCK, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(READ_LOCK), lock_counter: AtomicU64::new(1) });
+        }
+
+    }
+
+    pub fn unlock_tx_accounts(
+        &mut self,
+        write_accounts: &[&Pubkey],
+        read_accounts:&[&Pubkey]
+    ) {
+        for account in write_accounts {
+            self.0.entry(**account)
+            .and_modify(|a|{
+                a.lock_type.store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
+                a.lock_counter.store(0, std::sync::atomic::Ordering::SeqCst);
+            })
+            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(WRITE_LOCK), lock_counter: AtomicU64::new(1) });
+        }
+
+       for account in read_accounts {
+            self.0.entry(**account)
+            .and_modify(|a|{
+                let previous_counter = a.lock_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                if previous_counter == 1{
+                    a.lock_type.store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(READ_LOCK), lock_counter: AtomicU64::new(1) });
+        }
+
+    }
+
 
 }

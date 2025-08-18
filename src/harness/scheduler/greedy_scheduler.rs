@@ -196,11 +196,9 @@ impl GreedyScheduler {
         ) {
             Ok(thread_id) => thread_id,
             Err(TryLockError::MultipleConflicts) => {
-                info!("Got conflict: TryLockError::MultipleConflicts");
                 return Err(TransactionSchedulingError::UnschedulableConflicts);
             }
             Err(TryLockError::ThreadNotAllowed) => {
-                info!("Got conflict: TryLockError::ThreadNotAllowed");
                 return Err(TransactionSchedulingError::UnschedulableThread);
             }
         };
