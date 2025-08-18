@@ -293,7 +293,9 @@ pub struct SharedAccountLocks (AHashMap<Pubkey, AtomicAccountLock>);
 #[derive(Debug)]
 struct AtomicAccountLock {
     lock_type: AtomicU8,
-    lock_counter: AtomicU64
+    lock_counter: AtomicU64,
+    num_read_access: AtomicU64,
+    num_write_access:AtomicU64
 }
 
 const NO_LOCK: u8 = 0;
@@ -302,7 +304,12 @@ const WRITE_LOCK: u8 = 1;
 
 impl Default for AtomicAccountLock {
     fn default() -> Self { 
-        Self { lock_type: AtomicU8::new(NO_LOCK), lock_counter: AtomicU64::new(0) }
+        Self { 
+            lock_type: AtomicU8::new(NO_LOCK), 
+            lock_counter: AtomicU64::new(0), 
+            num_read_access: AtomicU64::new(0),
+            num_write_access: AtomicU64::new(0),
+        }
      }
 }
 
@@ -314,7 +321,7 @@ impl SharedAccountLocks {
     pub fn try_lock_tx_accounts(
         &mut self,
         write_accounts: &[&Pubkey],
-        read_accounts:&[&Pubkey]
+        read_accounts: &[&Pubkey]
     ) -> anyhow::Result<(), TryLockError> {
         match  self.check_tx_accounts(write_accounts, read_accounts){
             Ok(_) => {
@@ -328,7 +335,7 @@ impl SharedAccountLocks {
     pub fn check_tx_accounts(
         &self,
         write_accounts: &[&Pubkey],
-        read_accounts:&[&Pubkey]
+        read_accounts: &[&Pubkey]
     ) -> anyhow::Result<(), TryLockError> {
         for account in write_accounts {
             match self.0.get(account) {
@@ -358,15 +365,23 @@ impl SharedAccountLocks {
     pub fn lock_tx_accounts(
         &mut self,
         write_accounts: &[&Pubkey],
-        read_accounts:&[&Pubkey]
+        read_accounts: &[&Pubkey]
     ) {
         for account in write_accounts {
             self.0.entry(**account)
             .and_modify(|a|{
                 a.lock_type.store(WRITE_LOCK, std::sync::atomic::Ordering::SeqCst);
                 a.lock_counter.store(1, std::sync::atomic::Ordering::SeqCst);
+                a.num_write_access.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
-            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(WRITE_LOCK), lock_counter: AtomicU64::new(1) });
+            .or_insert(
+                AtomicAccountLock { 
+                    lock_type: AtomicU8::new(WRITE_LOCK), 
+                    lock_counter: AtomicU64::new(1),
+                    num_read_access: AtomicU64::new(0),
+                    num_write_access: AtomicU64::new(1),
+                }
+            );
         }
 
        for account in read_accounts {
@@ -376,8 +391,16 @@ impl SharedAccountLocks {
                 if previous_counter == 0{
                     a.lock_type.store(READ_LOCK, std::sync::atomic::Ordering::SeqCst);
                 }
+                a.num_read_access.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
-            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(READ_LOCK), lock_counter: AtomicU64::new(1) });
+            .or_insert(
+                AtomicAccountLock { 
+                    lock_type: AtomicU8::new(READ_LOCK), 
+                    lock_counter: AtomicU64::new(1),
+                    num_read_access: AtomicU64::new(1),
+                    num_write_access: AtomicU64::new(0),
+                }
+            );
         }
 
     }
@@ -385,15 +408,14 @@ impl SharedAccountLocks {
     pub fn unlock_tx_accounts(
         &mut self,
         write_accounts: &[&Pubkey],
-        read_accounts:&[&Pubkey]
+        read_accounts: &[&Pubkey]
     ) {
         for account in write_accounts {
             self.0.entry(**account)
             .and_modify(|a|{
                 a.lock_type.store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
                 a.lock_counter.store(0, std::sync::atomic::Ordering::SeqCst);
-            })
-            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(WRITE_LOCK), lock_counter: AtomicU64::new(1) });
+            });
         }
 
        for account in read_accounts {
@@ -403,11 +425,30 @@ impl SharedAccountLocks {
                 if previous_counter == 1{
                     a.lock_type.store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
                 }
-            })
-            .or_insert(AtomicAccountLock { lock_type: AtomicU8::new(READ_LOCK), lock_counter: AtomicU64::new(1) });
+            });
         }
-
     }
 
+    pub fn get_top_read_locks(&self) {
+        let mut top = self.0.iter().sorted_by(|a: &(&Pubkey, &AtomicAccountLock),b: &(&Pubkey, &AtomicAccountLock)|{
+            Ord::cmp(&a.1.num_read_access.load(std::sync::atomic::Ordering::Relaxed), &b.1.num_read_access.load(std::sync::atomic::Ordering::Relaxed))
+        }).collect_vec();
+        top.reverse();
+        println!("\nTop 10 Account Read Locks:");
+        for i in 0..10 {
+            println!("{:?} -> R:{:?}, W:{:?}", top[i].0, top[i].1.num_read_access, top[i].1.num_write_access);
+        }
+    }
+
+    pub fn get_top_write_locks(&self) {
+        let mut top = self.0.iter().sorted_by(|a: &(&Pubkey, &AtomicAccountLock),b: &(&Pubkey, &AtomicAccountLock)|{
+            Ord::cmp(&a.1.num_write_access.load(std::sync::atomic::Ordering::Relaxed), &b.1.num_write_access.load(std::sync::atomic::Ordering::Relaxed))
+        }).collect_vec();
+        top.reverse();
+        println!("\nTop 10 Account Write Locks:");
+        for i in 0..10 {
+            println!("{:?} -> W:{:?}, R:{:?}", top[i].0, top[i].1.num_write_access, top[i].1.num_read_access);
+        }
+    }
 
 }

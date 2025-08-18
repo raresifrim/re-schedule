@@ -127,7 +127,7 @@ impl BloomScheduler {
                 let mut hasher = AHasher::default();
                 hasher.write(write_account.as_array());
                 let index = hasher.finish();
-                let write_filter_result = self.local_filter.query_u64_with_result(index);
+                let write_filter_result = self.local_filter.search_u64(index);
                 self.w_query_results.push(write_filter_result);
             }
 
@@ -135,7 +135,7 @@ impl BloomScheduler {
                 let mut hasher = AHasher::default();
                 hasher.write(read_account.as_array());
                 let index = hasher.finish();
-                let read_filter_result = self.local_filter.query_u64_with_result(index);
+                let read_filter_result = self.local_filter.search_u64(index);
                 self.r_query_results.push(read_filter_result);
             }
 

@@ -93,6 +93,9 @@ S: Scheduler + Send + Sync + 'static
         println!("-------------------------------------------\n");
         
         println!("\n------- Transaction Execution Results ------");
+        let mutex = account_locks.lock().unwrap();
+        mutex.get_top_read_locks();
+        mutex.get_top_write_locks();
         println!("-------------------------------------------\n");
     }
 }

@@ -129,10 +129,10 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
     info!("Initializing scheduler harness");
     match config.scheduler_type {
-        SchedulerType::Bloom => {
-            let k = 3;
+        SchedulerType::Bloom => { //128KB filter
+            let k = 2;
             let w = 64;
-            let l = 4096;
+            let l = 16384;
             let scheduler = BloomScheduler::new(
                 config.num_workers as usize, 
                 k, //number of hashes 
