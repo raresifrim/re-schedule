@@ -35,7 +35,7 @@ impl RoundRobinScheduler {
     pub fn new(num_workers: usize, cu_quant: u64, bank: Arc<Bank>) -> Self {
         let mut rr_distribution = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
-            rr_distribution.insert(i, (cu_quant, vec![]));
+            rr_distribution.insert(i, (cu_quant / num_workers as u64, vec![]));
         }
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {

@@ -1,4 +1,5 @@
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
+use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::Scheduler;
@@ -151,7 +152,12 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             info!("Finalized scheduler harness");
         }
         SchedulerType::Greedy => {
-            let scheduler = SequentialScheduler::new();
+            let scheduler = GreedyScheduler::new(
+                start_bank.clone(),
+                config.num_workers as usize,
+                config.batch_size as usize,
+                MAX_COMPUTE_UNIT_LIMIT as u64
+            );
             let scheduler_harness = SchedulerHarness::new_from_config(
                 config,
                 scheduler,

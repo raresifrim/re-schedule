@@ -83,7 +83,6 @@ where Tx: Send + Sync + 'static {
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
-                                info!("Received successfully executed txs");
                                 match finished_work.completed_entry.unwrap() {
                                     WorkEntry::SingleTx(_) => {
                                         num_txs -= 1;
@@ -94,6 +93,7 @@ where Tx: Send + Sync + 'static {
                                         self.summary.num_txs_executed += txs.len();
                                     }
                                 };
+                                info!("Successfully executed {}% of txs", (self.summary.num_initial_txs - num_txs) * 100 / self.summary.num_initial_txs);
                             }
 
                             if finished_work.failed_entry.is_some() {
