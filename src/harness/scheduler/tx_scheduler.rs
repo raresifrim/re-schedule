@@ -1,48 +1,37 @@
-use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler, SchedulingSummary, Work, SATURATION, TOTAL_TXS};
+use crate::harness::scheduler::scheduler::{
+    HarnessTransaction, SATURATION, Scheduler, SchedulingSummary, TOTAL_TXS, Work,
+};
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
 
 #[derive(Debug)]
-pub struct TxScheduler<S> where
-S: Scheduler + Send + Sync + 'static,
+pub struct TxScheduler<S>
+where
+    S: Scheduler + Send + Sync + 'static,
 {
     /// scheduler strategy used for the tx scheduler
-    scheduler: S,
+    pub scheduler: S,
     /// channel connected to the tx issuer
-    work_issuer: Receiver<Work<S::Tx>>,
+    pub work_issuer: Receiver<Work<S::Tx>>,
     /// channel connected to the tx executors
-    work_executors: Vec<Sender<Work<S::Tx>>>,
+    pub work_executors: Vec<Sender<Work<S::Tx>>>,
 }
 
-impl<S> TxScheduler<S> where
-S: Scheduler + Send + Sync + 'static,
+impl<S> TxScheduler<S>
+where
+    S: Scheduler + Send + Sync + 'static,
 {
-    pub fn new(
-        scheduler: S,
-        work_issuer: Receiver<Work<S::Tx>>,
-        work_executors: Vec<Sender<Work<S::Tx>>>,
-    ) -> Self {
-        Self {
-            scheduler,
-            work_issuer,
-            work_executors,
-        }
-    }
-
     pub fn run(mut self) -> std::thread::JoinHandle<SchedulingSummary> {
-        let handle = std::thread::spawn(move || {
-            // the schedulers' schedule function should implement the loop 
+        std::thread::spawn(move || {
+            // the schedulers' schedule function should implement the loop
             // that receives txs until the channel becomes empty or disconnected
             let schedule_resp = self
                 .scheduler
                 .schedule(&self.work_issuer, &self.work_executors);
-            match schedule_resp {
-                Err(e) => {
-                    //scheduler should return errors such as channels disconnected
-                    //in which case we should end its execution
-                    info!("Received following error from scheduler {:?}", e);
-                }
-                Ok(_) => {}
+            if let Err(e) = schedule_resp {
+                //scheduler should return errors such as channels disconnected
+                //in which case we should end its execution
+                info!("Received following error from scheduler {:?}", e);
             }
 
             //compute saturation per worker in regard of total txs scheduled
@@ -54,9 +43,7 @@ S: Scheduler + Send + Sync + 'static,
                 report[SATURATION] = ((txs_per_worker / total_txs) * 100.0) as u64;
             }
 
-            return  summary;
-        });
-        //return handle
-        handle
+            summary
+        })
     }
 }
