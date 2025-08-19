@@ -82,9 +82,8 @@ pub struct RescheduleArgs {
     pub simulate: bool,
 }
 
-#[instrument(name = "run_schedule")]
+#[tracing::instrument(name = "init", skip(args))]
 pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
-    info!("Starting replay");
     // Load config
     let mut config = Config::load_from_json(
         &args.config_path,
@@ -98,20 +97,17 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     )
     .await
     .context("Failed to load configuration")?;
-    info!("Loaded configuration for replay");
-
-    info!("Setting up directories and loading snapshots...");
     let (start_bank, bank_forks) =
         load_bank_from_snapshot(&config.start_snapshot, &config.genesis, args.simulate)
             .context("Failed to load start bank from snapshot")?;
 
-    //we must set the fork_graph cache for the extracted bank as it is not set automatically when unpacking snapshot
-    let fork_graph = Arc::new(bank_forks);
-    start_bank.set_fork_graph_in_program_cache(Arc::downgrade(&fork_graph));
-    //clear status cache of the bank in order to execute old txs hat might still be cached and will otherwise return AlreadyProcessed
+    // we must set the fork_graph cache for the extracted bank as it
+    // is not set automatically when unpacking snapshot
+    start_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
+    // clear status cache of the bank in order to execute old txs hat
+    // might still be cached and will otherwise return
+    // AlreadyProcessed
     start_bank.status_cache.write().unwrap().clear();
-
-    info!("Completed setting up directories and loading snapshots...");
 
     info!("Loading transactions from local file");
     let transactions = load_runtime_transactions(
@@ -127,77 +123,76 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     );
 
     info!("Initializing scheduler harness");
+    // TODO: Refactor
     match config.scheduler_type {
         SchedulerType::Bloom => {
-            //128KB filter
-            let k = 2;
-            let w = 64;
-            let l = 16384;
-            let scheduler = BloomScheduler::new(
-                config.num_workers as usize,
-                k, //number of hashes
-                l, //filter length
-                w, //filter row width in bits
-                config.batch_size as usize,
-            );
-            let scheduler_harness =
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness");
-
-            info!("Starting scheduler harness");
+            let scheduler_harness = {
+                //128KB filter
+                let k = 2;
+                let w = 64;
+                let l = 16384;
+                let scheduler = BloomScheduler::new(
+                    config.num_workers as usize,
+                    k, //number of hashes
+                    l, //filter length
+                    w, //filter row width in bits
+                    config.batch_size as usize,
+                );
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+            };
+            info!("Initialized Bloom harness");
             scheduler_harness.run();
-            info!("Finalized scheduler harness");
         }
         SchedulerType::Greedy => {
-            let scheduler = GreedyScheduler::new(
-                start_bank.clone(),
-                config.num_workers as usize,
-                config.batch_size as usize,
-                MAX_COMPUTE_UNIT_LIMIT as u64,
-            );
-            let scheduler_harness =
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness");
-
-            info!("Starting scheduler harness");
+            let scheduler_harness = {
+                let scheduler = GreedyScheduler::new(
+                    start_bank.clone(),
+                    config.num_workers as usize,
+                    config.batch_size as usize,
+                    MAX_COMPUTE_UNIT_LIMIT as u64,
+                );
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+            };
+            info!("Initialized Greedy harness");
             scheduler_harness.run();
-            info!("Finalized scheduler harness");
         }
         SchedulerType::PrioGraph => {
-            let scheduler = SequentialScheduler::new();
-            let scheduler_harness =
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness");
-
-            info!("Starting scheduler harness");
+            let scheduler_harness = {
+                let scheduler = SequentialScheduler::new();
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+            };
+            info!("Initialized PrioGraph harness");
             scheduler_harness.run();
-            info!("Finalized scheduler harness");
         }
         SchedulerType::Sequential => {
-            let scheduler = SequentialScheduler::new();
-            config.num_workers = 1; //in sequential mode we only use one worker for executing txs
-            let scheduler_harness =
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness with Sequential scheduler");
-
-            info!("Starting scheduler harness");
+            let scheduler_harness = {
+                let scheduler = SequentialScheduler::new();
+                if config.num_workers != 1 {
+                    tracing::warn!(
+                        num_workers = config.num_workers,
+                        "Sequential scheduler cannot use more than one worker"
+                    );
+                    config.num_workers = 1;
+                };
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+            };
+            info!("Initialized Sequential harness");
             scheduler_harness.run();
-            info!("Finalized scheduler harness");
         }
         SchedulerType::RoundRobin => {
-            let cu_quant = MAX_COMPUTE_UNIT_LIMIT as u64;
-            let scheduler =
-                RoundRobinScheduler::new(config.num_workers as usize, cu_quant, start_bank.clone());
-            let scheduler_harness =
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
-            info!("Initialized scheduler harness with RoundRobin Scheduler");
-
-            info!("Starting scheduler harness");
+            let scheduler_harness = {
+                let scheduler = RoundRobinScheduler::new(
+                    config.num_workers as usize,
+                    MAX_COMPUTE_UNIT_LIMIT as u64,
+                    start_bank.clone(),
+                );
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+            };
+            info!("Initialized RoundRobin harness");
             scheduler_harness.run();
-            info!("Finalized scheduler harness");
         }
     };
-
+    info!("Finalized scheduler harness");
     Ok(())
 }
 
@@ -227,57 +222,58 @@ fn load_runtime_transactions(
             let tx_bytes = general_purpose::STANDARD
                 .decode(&v)
                 .expect("Failed to decode base64 encoded tx");
-            let tx = bincode::deserialize::<VersionedTransaction>(&tx_bytes)
-                .expect("Failed to deserialize tx");
-            tx
+
+            bincode::deserialize::<VersionedTransaction>(&tx_bytes)
+                .expect("Failed to deserialize tx")
         })
         .collect();
 
-    if versioned_txs.len() == 0 {
-        panic!("No txs found to be replayed and rescheduled, aborting run...");
-    }
+    assert!(
+        !versioned_txs.is_empty(),
+        "No transactions to reschedule. Aborting"
+    );
 
     let rng = &mut StdRng::seed_from_u64(420); //use same seed every run
     //create a normal distribution simulation times with a standard deviation of 3.16 and mean of 12
     let gaussian_distr = Normal::new(12.0, 3.16).unwrap();
     let mut hasher = AHasher::default();
 
-    //txs cannot be cloned/copied so we need the iterator to consume it and move it permanenty
-    //thus we cannot use the counter directly in the loop and also to reference inside the cevtor
-    //so we have to increment the above counter variable and break the loop once we reached our goal
-    for tx in versioned_txs {
+    // txs cannot be cloned/copied so we need the iterator to consume
+    // it and move it permanenty thus we cannot use the counter
+    // directly in the loop and also to reference inside the cevtor so
+    // we have to increment the above counter variable and break the
+    // loop once we reached our goal
+    'outer: for tx in versioned_txs {
         let message_hash = tx.verify_and_hash_message()?;
 
         if simulate {
-            match tx.into_legacy_transaction() {
-                Some(transaction) => {
-                    let final_tx =
-                        RuntimeTransaction::<SanitizedTransaction>::from_transaction_for_tests(
-                            transaction,
-                        );
-                    if !final_tx.is_simple_vote_transaction() {
+            if let Some(transaction) = tx.into_legacy_transaction() {
+                let final_tx = RuntimeTransaction::from_transaction_for_tests(transaction);
+                if !final_tx.is_simple_vote_transaction() {
+                    let simulated_ex_us = {
                         //get a random simuation time
                         let v = gaussian_distr.sample(rng); //from_zscore(uniform_distr.sample(rng));
                         //convert it to micro_secs
-                        let v = (v * 1000.0) as u64;
-                        info!("Generating simulation time for non-voting tx as {} us", v);
-                        //generate the compressed blockhash
+                        Some((v * 1000.0) as u64)
+                    };
+                    //generate the compressed blockhash
+                    let blockhash = {
                         hasher.write(&final_tx.recent_blockhash().to_bytes());
-                        let blockhash = hasher.finish();
-                        //push tx
-                        let final_tx = HarnessTransaction {
-                            transaction: final_tx,
-                            account_overrides: AccountOverrides::default(),
-                            simulated_ex_us: Some(v),
-                            blockhash,
-                            retry: false,
-                        };
-                        transactions.push_back(final_tx);
-                    }
+                        hasher.finish()
+                    };
+                    //push tx
+                    let final_tx = HarnessTransaction {
+                        transaction: final_tx,
+                        account_overrides: AccountOverrides::default(),
+                        simulated_ex_us,
+                        blockhash,
+                        retry: false,
+                    };
+                    transactions.push_back(final_tx);
                 }
-                None => {}
             }
         } else {
+            // TODO: Send an angry email, about the abuse of the `try_from` name.
             let runtime_tx = RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
                 SanitizedVersionedTransaction::try_from(tx)?,
                 solana_sdk::transaction::MessageHash::Precomputed(message_hash),
@@ -289,15 +285,16 @@ fn load_runtime_transactions(
                     root_bank,
                     root_bank.get_reserved_account_keys().clone(),
                 )?;
-                hasher.write(&final_tx.transaction.recent_blockhash().to_bytes());
-                let blockhash = hasher.finish();
-                final_tx.blockhash = blockhash;
+                final_tx.blockhash = {
+                    hasher.write(&final_tx.transaction.recent_blockhash().to_bytes());
+                    hasher.finish()
+                };
                 transactions.push_back(final_tx);
             }
         }
 
         if transactions.len() == num_txs {
-            break;
+            break 'outer;
         }
     }
 

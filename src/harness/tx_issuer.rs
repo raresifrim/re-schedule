@@ -1,21 +1,21 @@
+use crate::harness::scheduler::scheduler::WorkEntry;
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
+use crate::harness::tx_executor::FinishedWork;
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
 use std::collections::VecDeque;
 use std::time::Instant;
 use tracing::info;
-use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
-use crate::harness::scheduler::scheduler::WorkEntry;
-use crate::harness::tx_executor::FinishedWork;
 
 pub struct TxIssuer<Tx> {
     transactions: VecDeque<HarnessTransaction<Tx>>,
     completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
     work_sender: Sender<Work<Tx>>,
-    summary: TxIssuerSummary
+    summary: TxIssuerSummary,
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct TxIssuerSummary{
+pub struct TxIssuerSummary {
     /// number of txs received at the begining of the reschedule operation
     num_initial_txs: usize,
     /// total number of txs that were completely executed, either directly or via retry
@@ -30,31 +30,30 @@ pub struct TxIssuerSummary{
     theoretical_tx_throughput: f64,
 }
 
-impl<Tx> TxIssuer<Tx> 
-where Tx: Send + Sync + 'static {
+impl<Tx> TxIssuer<Tx>
+where
+    Tx: Send + Sync + 'static,
+{
     pub fn new(
         completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
         work_sender: Sender<Work<Tx>>,
         transactions: VecDeque<HarnessTransaction<Tx>>,
     ) -> Self {
-
         let num_initial_txs = transactions.len();
 
         Self {
             transactions,
             completed_work_receiver,
             work_sender,
-            summary: TxIssuerSummary { 
-                num_initial_txs, 
+            summary: TxIssuerSummary {
+                num_initial_txs,
                 ..Default::default()
-            }
+            },
         }
     }
 
     pub fn run(mut self) -> std::thread::JoinHandle<TxIssuerSummary> {
-        let handle = std::thread::spawn(move || {
-            self.issue_txs()
-        });
+        let handle = std::thread::spawn(move || self.issue_txs());
         //return handle
         handle
     }
@@ -74,7 +73,7 @@ where Tx: Send + Sync + 'static {
 
             let selected_worker = recv_selector.try_select();
             match selected_worker {
-                Err(_) => {/*No confirmation recived form any worker, moving on...*/},
+                Err(_) => { /*No confirmation recived form any worker, moving on...*/ }
                 Ok(operation) => {
                     let worker_index = operation.index();
                     //info!("Received work from worker {:?}", worker_index);
@@ -93,11 +92,15 @@ where Tx: Send + Sync + 'static {
                                         self.summary.num_txs_executed += txs.len();
                                     }
                                 };
-                                info!("Successfully executed {}% of txs", (self.summary.num_initial_txs - num_txs) * 100 / self.summary.num_initial_txs);
+                                tracing::debug!(
+                                    "Successfully executed {}% of txs",
+                                    (self.summary.num_initial_txs - num_txs) * 100
+                                    / self.summary.num_initial_txs
+                                );
                             }
 
                             if finished_work.failed_entry.is_some() {
-                                info!(
+                                tracing::debug!(
                                     "Found failed txs..pushing them back to queue for rescheduling"
                                 );
                                 let failed_work = finished_work.failed_entry.unwrap();
@@ -118,7 +121,7 @@ where Tx: Send + Sync + 'static {
                                 };
                             }
                         }
-                        Err(_) => {/*"No completed work received yet"*/}
+                        Err(_) => { /*"No completed work received yet"*/ }
                     };
                 }
             }
@@ -147,28 +150,28 @@ where Tx: Send + Sync + 'static {
                 match self.work_sender.try_send(Work {
                     entry: WorkEntry::SingleTx(tx),
                 }) {
-                    Ok(_) => info!("Successfully issued another tx to the scheduler"),
+                    Ok(_) => tracing::debug!("Successfully issued another tx to the scheduler"),
                     Err(e) => {
                         match e {
                             //when full, we should push back our txs
-                            TrySendError::Full(tx) =>{
+                            TrySendError::Full(tx) => {
                                 match tx.entry {
                                     WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
                                     WorkEntry::MultipleTxs(mut txs) => {
-                                        while !txs.is_empty() {
-                                            self.transactions.push_front(txs.pop().unwrap());
+                                        while let Some(element) = txs.pop() {
+                                            self.transactions.push_front(element);
                                         }
                                     }
                                 };
                                 info!("Scheduler channel is full, trying again later...");
                                 break;
-                            },
+                            }
                             TrySendError::Disconnected(tx) => {
                                 match tx.entry {
                                     WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
                                     WorkEntry::MultipleTxs(mut txs) => {
-                                        while !txs.is_empty() {
-                                            self.transactions.push_front(txs.pop().unwrap());
+                                        while let Some(element) = txs.pop() {
+                                            self.transactions.push_front(element);
                                         }
                                     }
                                 };
@@ -187,6 +190,5 @@ where Tx: Send + Sync + 'static {
         self.summary.real_tx_throughput = self.summary.num_initial_txs as f64 / end_time;
         self.summary.theoretical_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
         self.summary.clone()
-
     }
 }

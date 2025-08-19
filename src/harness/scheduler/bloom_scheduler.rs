@@ -244,7 +244,7 @@ impl Scheduler for BloomScheduler {
             //quickly check if there are new incoming txs
             match issue_channel.try_recv() {
                 Ok(tx) => {
-                    info!("Received txs from TxIssuer");
+                    tracing::debug!("Received txs from TxIssuer");
                     match tx.entry {
                         WorkEntry::SingleTx(tx) => {
                             self.buffer.push_back(tx);

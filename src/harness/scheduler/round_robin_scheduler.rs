@@ -67,7 +67,7 @@ impl Scheduler for RoundRobinScheduler {
         loop {
             match issue_channel.try_recv() {
                 Ok(tx) => {
-                    info!("Received txs from TxIssuer");
+                    tracing::debug!("Received txs from TxIssuer");
                     match tx.entry {
                         WorkEntry::SingleTx(tx) => {
                             let cost_of_tx =

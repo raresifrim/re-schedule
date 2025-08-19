@@ -70,12 +70,12 @@ where
         }
     }
 
+    #[tracing::instrument(skip(self, account_locks))]
     pub fn run(
         self,
         account_locks: Option<Arc<Mutex<SharedAccountLocks>>>,
     ) -> std::thread::JoinHandle<()> {
-        let handle = std::thread::spawn(move || {
-            info!("Startng worker thread");
+        std::thread::spawn(move || {
             if self.simulate {
                 self.execute_txs(account_locks.unwrap());
             } else {
@@ -83,13 +83,13 @@ where
                 let empty_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
                 self.execute_txs(empty_locks);
             }
-        });
-        //return handle
-        handle
+        })
     }
+
+    #[tracing::instrument(skip(self, account_locks))]
     fn execute_txs(&self, account_locks: Arc<Mutex<SharedAccountLocks>>) {
         while let Ok(work) = self.work_receiver.recv() {
-            info!("Received new batch of work...");
+            tracing::debug!("Received new batch of work...");
 
             let mut harness_transactions = vec![];
             match work.entry {
@@ -107,19 +107,19 @@ where
                     Ok(pt) => {
                         match pt.status() {
                             Ok(_) => {
-                                info!(
-                                    "Successfuly executed transaction identified by message hash and signature: {:?}, {:?}",
-                                    tx.transaction.message_hash(),
-                                    tx.transaction.signature()
+                                tracing::debug!(
+                                    msg = ?tx.transaction.message_hash(),
+                                    sig = ?tx.transaction.signature(),
+                                    "Execute success",
                                 );
                                 completed_txs.push(tx);
                             }
                             Err(e) => {
-                                info!(
-                                    "Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
-                                    tx.transaction.message_hash(),
-                                    tx.transaction.signature(),
-                                    e
+                                tracing::warn!(
+                                    err = ?e,
+                                    msg = ?tx.transaction.message_hash(),
+                                    // sig = ?tx.transaction.signature(),
+                                    "Execution failed",
                                 );
                                 failed_txs.push(tx);
                             }
@@ -159,7 +159,7 @@ where
                 info!("Tx issuer not present anymore, exiting as well...");
                 break;
             }
-            info!("Transaction executed and result sent back for recording");
+            tracing::debug!("Transaction executed and result sent back for recording");
         }
     }
 
@@ -188,7 +188,7 @@ where
             actual_execute_time += tx_time;
         }
 
-        info!(
+        tracing::debug!(
             "Executed {} transactions in {} us",
             harness_transactions.len(),
             actual_execute_time
@@ -283,7 +283,7 @@ where
 
         let status = match lock_result {
             Ok(()) => {
-                info!(
+                tracing::debug!(
                     "Thread {} can lock current tx and start executing it",
                     self.thread_id
                 );
@@ -293,7 +293,7 @@ where
                 Ok(())
             }
             Err(TryLockError::MultipleConflicts) => {
-                info!("Got conflict: TryLockError::MultipleConflicts");
+                tracing::debug!("Got conflict: TryLockError::MultipleConflicts");
                 Err(TransactionError::AccountInUse)
             }
             Err(TryLockError::ThreadNotAllowed) => {

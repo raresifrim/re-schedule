@@ -93,7 +93,9 @@ impl GreedyScheduler {
                 .working_account_set
                 .check_locks(&transaction_state.transaction)
             {
-                info!("Found exisitng lock on accounts of new popped tx, sending all txs out...");
+                tracing::debug!(
+                    "Found exisitng lock on accounts of new popped tx, sending all txs out..."
+                );
                 self.working_account_set.clear();
                 self.container.push_back(transaction_state);
                 // Push unschedulables back into the queue
@@ -121,7 +123,7 @@ impl GreedyScheduler {
                     self.scheduling_summary.total_txs += 1;
                     self.batches
                         .add_transaction_to_batch(thread_id, transaction_state, cost);
-                    info!("Added one more tx to the batch of worker {}", thread_id);
+                    tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
 
                     let report = self
                         .scheduling_summary
@@ -228,7 +230,7 @@ impl Scheduler for GreedyScheduler {
             //quickly check if there are new incoming txs
             match issue_channel.try_recv() {
                 Ok(tx) => {
-                    info!("Received txs from TxIssuer");
+                    tracing::debug!("Received txs from TxIssuer");
                     match tx.entry {
                         WorkEntry::SingleTx(tx) => {
                             self.container.push_back(tx);
@@ -279,13 +281,14 @@ impl Scheduler for GreedyScheduler {
             current_buffer_len = 0;
 
             //STAGE 3: send the current scheduled txs to the workers
-            for worker_index in 0..self.num_workers {
+            let tmp = 0..self.num_workers;
+            for worker_index in tmp {
                 let (txs, total_cus) = self
                     .batches
                     .take_batch(worker_index, self.batch_size / self.num_workers);
 
-                if txs.len() > 0 {
-                    info!("Sending {} txs to worker {}", txs.len(), worker_index);
+                if !txs.is_empty() {
+                    tracing::debug!("Sending {} txs to worker {}", txs.len(), worker_index);
 
                     self.in_flight_tracker
                         .track_batch(txs.len(), total_cus, worker_index);

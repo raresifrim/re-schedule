@@ -31,7 +31,7 @@ where
             if let Err(e) = schedule_resp {
                 //scheduler should return errors such as channels disconnected
                 //in which case we should end its execution
-                info!("Received following error from scheduler {:?}", e);
+                info!("Channel disconnected");
             }
 
             //compute saturation per worker in regard of total txs scheduled

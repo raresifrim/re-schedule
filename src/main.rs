@@ -11,13 +11,12 @@ use tracing_subscriber::{EnvFilter, fmt};
 async fn main() -> anyhow::Result<()> {
     fmt::fmt()
         .with_env_filter(EnvFilter::new("info"))
-        .with_level(false)
         .with_writer(std::io::stderr)
         .compact()
         .init();
 
     let cli = Cli::parse();
-    info!(command = ?cli.command, "Parsed CLI command");
+    info!("Running with {:#?}", cli);
 
     match cli.command {
         Commands::Reschedule(args) => {
