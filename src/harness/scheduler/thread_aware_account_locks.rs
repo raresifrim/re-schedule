@@ -13,21 +13,20 @@ pub const MAX_THREADS: usize = u64::BITS as usize;
 /// Identifier for a thread
 pub type ThreadId = usize; // 0..MAX_THREADS-1
 
-type LockCount = u32;
-
 /// A bit-set of threads an account is scheduled or can be scheduled for.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct ThreadSet(u64);
+
 #[derive(Debug)]
 pub struct AccountWriteLocks {
     thread_id: ThreadId,
-    lock_count: LockCount,
+    lock_count: u32,
 }
 
 #[derive(Debug)]
 pub struct AccountReadLocks {
     thread_set: ThreadSet,
-    lock_counts: [LockCount; MAX_THREADS],
+    lock_counts: [u32; MAX_THREADS],
 }
 
 /// Account locks.
@@ -35,7 +34,7 @@ pub struct AccountReadLocks {
 ///     Contains how many write locks are held by the thread.
 /// Read Locks - multiple threads can hold a read lock at a time.
 ///     Contains thread-set for easily checking which threads are scheduled.
-#[derive(Default,Debug)]
+#[derive(Default, Debug)]
 pub struct AccountLocks {
     pub write_locks: Option<AccountWriteLocks>,
     pub read_locks: Option<AccountReadLocks>,
@@ -129,7 +128,7 @@ impl ThreadAwareAccountLocks {
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
         thread_id: ThreadId,
-    ) { 
+    ) {
         for account in write_account_locks {
             self.write_unlock_account(account, thread_id);
         }
@@ -484,4 +483,3 @@ impl Iterator for ThreadSetIterator {
         }
     }
 }
-
