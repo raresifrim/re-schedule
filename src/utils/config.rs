@@ -2,10 +2,10 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use solana_sdk::genesis_config::GenesisConfig;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::{fs};
 use strum_macros::{Display, EnumIter, EnumString};
 use tracing::info;
 
@@ -19,7 +19,7 @@ pub struct JsonNetworkConfig {
     pub num_txs: u64,
     pub batch_size: u64,
     pub slot_duration: u64,
-    pub num_workers: u64
+    pub num_workers: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,8 +45,9 @@ pub fn upload_json_config(path: &str, json_config: JsonConfig) -> anyhow::Result
     Ok(())
 }
 
-
-#[derive(Default, Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash, ValueEnum, Display)]
+#[derive(
+    Default, Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash, ValueEnum, Display,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum NetworkType {
     Devnet,
@@ -66,7 +67,7 @@ pub enum SchedulerType {
     PrioGraph,
     Bloom,
     Sequential,
-    RoundRobin
+    RoundRobin,
 }
 
 // New struct to represent a snapshot with its directories
@@ -86,7 +87,10 @@ impl Snapshot {
 
         // Create or clear accounts directory
         if accounts_dir.exists() {
-            info!("Found exisitng accounts directory at {:?}. Will use this one", accounts_dir);
+            info!(
+                "Found exisitng accounts directory at {:?}. Will use this one",
+                accounts_dir
+            );
         } else {
             fs::create_dir_all(&accounts_dir).expect("Failed to create accounts directory");
         }
@@ -124,7 +128,7 @@ pub struct Config {
     pub batch_size: u64,
     pub slot_duration: u64,
     pub num_workers: u64,
-    pub simulate: bool
+    pub simulate: bool,
 }
 
 impl Config {
@@ -132,7 +136,7 @@ impl Config {
         json_path: &Path,
         network_type: NetworkType,
         scheduler_type: SchedulerType,
-        simulate:bool,
+        simulate: bool,
         // CLI Overrides (passed from main)
         cli_num_txs: Option<u64>,
         cli_batch_size: Option<u64>,
@@ -172,12 +176,16 @@ impl Config {
                     n
                 }
             }
-            None => network_config.num_txs
+            None => network_config.num_txs,
         };
 
         let batch_size = cli_batch_size.or(Some(network_config.batch_size)).unwrap();
-        let slot_duration = cli_slot_duration.or(Some(network_config.slot_duration)).unwrap();
-        let num_workers = cli_num_workers.or(Some(network_config.num_workers)).unwrap();
+        let slot_duration = cli_slot_duration
+            .or(Some(network_config.slot_duration))
+            .unwrap();
+        let num_workers = cli_num_workers
+            .or(Some(network_config.num_workers))
+            .unwrap();
         Ok(Self {
             start_snapshot,
             network_type,
@@ -187,7 +195,7 @@ impl Config {
             batch_size,
             slot_duration,
             num_workers,
-            simulate
+            simulate,
         })
     }
 

@@ -30,10 +30,14 @@ pub struct AccountReadLocks {
 }
 
 /// Account locks.
-/// Write Locks - only one thread can hold a write lock at a time.
-///     Contains how many write locks are held by the thread.
-/// Read Locks - multiple threads can hold a read lock at a time.
-///     Contains thread-set for easily checking which threads are scheduled.
+///
+/// Write Locks:
+/// only one thread can hold a write lock at a time.
+/// Contains how many write locks are held by the thread.
+///
+/// Read Locks:
+/// multiple threads can hold a read lock at a time.
+/// Contains thread-set for easily checking which threads are scheduled.
 #[derive(Default, Debug)]
 pub struct AccountLocks {
     pub write_locks: Option<AccountWriteLocks>,
