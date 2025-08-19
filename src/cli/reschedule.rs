@@ -44,7 +44,7 @@ use std::hash::Hasher;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -124,7 +124,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
     info!("Initializing scheduler harness");
     // TODO: Refactor
-    match config.scheduler_type {
+    let summary = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler_harness = {
                 //128KB filter
@@ -141,7 +141,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
             info!("Initialized Bloom harness");
-            scheduler_harness.run();
+            scheduler_harness.run()
         }
         SchedulerType::Greedy => {
             let scheduler_harness = {
@@ -154,7 +154,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
             info!("Initialized Greedy harness");
-            scheduler_harness.run();
+            scheduler_harness.run()
         }
         SchedulerType::PrioGraph => {
             let scheduler_harness = {
@@ -162,7 +162,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
             info!("Initialized PrioGraph harness");
-            scheduler_harness.run();
+            scheduler_harness.run()
         }
         SchedulerType::Sequential => {
             let scheduler_harness = {
@@ -177,7 +177,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
             info!("Initialized Sequential harness");
-            scheduler_harness.run();
+            scheduler_harness.run()
         }
         SchedulerType::RoundRobin => {
             let scheduler_harness = {
@@ -189,10 +189,14 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
             info!("Initialized RoundRobin harness");
-            scheduler_harness.run();
+            scheduler_harness.run()
         }
     };
     info!("Finalized scheduler harness");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).expect("Failed to convert to JSON")
+    );
     Ok(())
 }
 
@@ -210,7 +214,7 @@ fn load_runtime_transactions(
     fs::exists(&snapshot_dir).context("Failed to get snapshot directory")?;
     let txs_path = snapshot_dir.join("transactions.json");
 
-    let file = fs::File::open(txs_path).context(format!("Failed to open tx json file"))?;
+    let file = fs::File::open(txs_path).context("Failed to open tx json file".to_string())?;
     let reader = io::BufReader::new(file);
     let base64_str: Vec<Vec<String>> =
         serde_json::from_reader(reader).context("Failed to parse tx json file")?;
@@ -220,7 +224,7 @@ fn load_runtime_transactions(
         .iter()
         .map(|v| {
             let tx_bytes = general_purpose::STANDARD
-                .decode(&v)
+                .decode(v)
                 .expect("Failed to decode base64 encoded tx");
 
             bincode::deserialize::<VersionedTransaction>(&tx_bytes)
@@ -311,9 +315,9 @@ pub fn build_sanitized_transaction(
     reserved_account_keys: HashSet<Pubkey>,
 ) -> anyhow::Result<HarnessTransaction<RuntimeTransaction<SanitizedTransaction>>> {
     // Resolve the lookup addresses and retrieve the min deactivation slot
-    let address_loader;
+
     let (loaded_addresses, _) = resolve_addresses_with_deactivation(&tx, bank)?;
-    address_loader = SimpleAddressLoader::Enabled(loaded_addresses);
+    let address_loader = SimpleAddressLoader::Enabled(loaded_addresses);
 
     let tx = RuntimeTransaction::<SanitizedTransaction>::try_from(
         tx,
@@ -322,7 +326,7 @@ pub fn build_sanitized_transaction(
     )?;
     //generate account overrides for re-executaion of transactions
     //this is for overcoming the AlreadyProcessed type of error
-    let accounts = get_account_overrides_for_simulation(&bank, &tx.account_keys());
+    let accounts = get_account_overrides_for_simulation(bank, &tx.account_keys());
     //generate the compressed blockhash
     Ok(HarnessTransaction {
         transaction: tx,

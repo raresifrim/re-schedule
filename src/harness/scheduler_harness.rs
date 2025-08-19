@@ -1,14 +1,16 @@
-use crate::harness::scheduler::scheduler::{
-    HarnessTransaction, RETRY_TXS, SATURATION, Scheduler, TOTAL_TXS, UNIQUE_TXS,
-};
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
 use crate::harness::scheduler::tx_scheduler::TxScheduler;
-use crate::harness::tx_executor::{SharedAccountLocks, TxExecutor};
+use crate::harness::tx_executor::{TxExecutor, support::SharedAccountLocks};
 use crate::harness::tx_issuer::TxIssuer;
 use crate::utils::config::Config;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use solana_runtime::bank::Bank;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+use super::scheduler::scheduler::SchedulingSummary;
+use super::tx_executor::support::LockSummary;
+use super::tx_issuer::TxIssuerSummary;
 
 pub struct SchedulerHarness<S>
 where
@@ -75,7 +77,7 @@ where
         })
     }
 
-    pub fn run(self) {
+    pub fn run(self) -> RunSummary {
         let mut harness_hdls = vec![];
         //the issuer will return the overall summary of the executiom
         let issuer_handle = self.tx_issuer.run();
@@ -96,28 +98,28 @@ where
 
         let issuer_summary = issuer_handle.join().unwrap();
         let scheduling_summary = scheduler_handle.join().unwrap();
+        let (read_locks, write_locks) = {
+            let mutex = account_locks.lock().unwrap();
+            (
+                mutex.get_top_read_locks(self.config.num_report_locks),
+                mutex.get_top_write_locks(self.config.num_report_locks),
+            )
+        };
 
-        println!("\n-------- Transaction Issuing Results -------");
-        println!("{:#?}", issuer_summary);
-        println!("-------------------------------------------\n");
-
-        println!("\n------ Transaction Scheduling Results ------");
-        for i in 0..(self.config.num_workers as usize) {
-            println!("------------- Worker {i} Summary -------------");
-            let worker_summary = scheduling_summary.txs_per_worker.get(&i).unwrap();
-            println!("Total unique txs executed: {}", worker_summary[UNIQUE_TXS]);
-            println!(
-                "Total txs executed: {} of which retried: {}",
-                worker_summary[TOTAL_TXS], worker_summary[RETRY_TXS]
-            );
-            println!("Worker saturation: {}%", worker_summary[SATURATION]);
+        RunSummary {
+            scheduling: scheduling_summary,
+            issuer: issuer_summary,
+            read_locks,
+            write_locks,
         }
-        println!("-------------------------------------------\n");
-
-        println!("\n------- Transaction Execution Results ------");
-        let mutex = account_locks.lock().unwrap();
-        mutex.get_top_read_locks();
-        mutex.get_top_write_locks();
-        println!("-------------------------------------------\n");
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[must_use]
+pub struct RunSummary {
+    scheduling: SchedulingSummary,
+    issuer: TxIssuerSummary,
+    read_locks: LockSummary,
+    write_locks: LockSummary,
 }

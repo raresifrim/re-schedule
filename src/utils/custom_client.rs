@@ -139,7 +139,7 @@ impl CustomClientTrait for SolanaClient {
         info!("Extracting genesis binary from archive");
         let decompressor = BzDecoder::new(fs::File::open(temp_download_path).unwrap());
         let mut archive = Archive::new(decompressor);
-        for (_, file) in archive.entries().unwrap().enumerate() {
+        for file in archive.entries().unwrap() {
             let mut file = file.unwrap();
             let file_path = file.path()?;
             if file_path.to_str().unwrap().contains("genesis.bin")
@@ -165,7 +165,7 @@ impl CustomClientTrait for SolanaClient {
 
         // Extract filename from the final URL's path
         let final_filename = final_url.path_segments().
-        and_then(|segments| segments.last()).
+        and_then(|mut segments| segments.next_back()).
         ok_or_else(|| anyhow::anyhow!("Could not extract filename from final URL: {}", final_url))?.
         to_string();
 
@@ -267,7 +267,7 @@ impl CustomClientTrait for SolanaClient {
         for id in block_ids {
             let block = self.get_block(id).await.unwrap();
             for tx in block.transactions.unwrap() {
-                if !tx.meta.as_ref().unwrap().err.is_some() {
+                if tx.meta.as_ref().unwrap().err.is_none() {
                     transactions.push(tx.transaction);
                 }
             }
@@ -316,7 +316,7 @@ impl CustomClientTrait for SolanaClient {
         let mut transactions = vec![];
         for block in blocks {
             for tx in block.transactions.unwrap() {
-               if !tx.meta.as_ref().unwrap().err.is_some() {
+               if tx.meta.as_ref().unwrap().err.is_none() {
                     transactions.push(tx.transaction);
                 }
             }

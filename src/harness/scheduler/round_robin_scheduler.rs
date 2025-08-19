@@ -1,10 +1,7 @@
 use crate::harness::scheduler::scheduler::HarnessTransaction;
-use crate::harness::scheduler::scheduler::RETRY_TXS;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
-use crate::harness::scheduler::scheduler::TOTAL_TXS;
-use crate::harness::scheduler::scheduler::UNIQUE_TXS;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use ahash::{HashMap, HashMapExt};
@@ -39,7 +36,7 @@ impl RoundRobinScheduler {
         }
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
-            txs_per_worker.insert(i, [0u64; 4]);
+            txs_per_worker.insert(i, super::scheduler::WorkerSummary::default());
         }
         let scheduling_summary = SchedulingSummary {
             txs_per_worker,
@@ -82,12 +79,12 @@ impl Scheduler for RoundRobinScheduler {
                                     .get_mut(&self.last_worker)
                                     .unwrap();
                                 if tx.retry {
-                                    txs_per_worker[RETRY_TXS] += 1;
+                                    txs_per_worker.retried += 1;
                                 } else {
-                                    txs_per_worker[UNIQUE_TXS] += 1;
+                                    txs_per_worker.unique += 1;
                                     self.scheduling_summary.unique_txs += 1;
                                 }
-                                txs_per_worker[TOTAL_TXS] += 1;
+                                txs_per_worker.total += 1;
                                 self.scheduling_summary.total_txs += 1;
                                 v.1.push(tx);
                                 v.0 = v.0.saturating_sub(cost_of_tx);
@@ -113,12 +110,12 @@ impl Scheduler for RoundRobinScheduler {
                                         .get_mut(&self.last_worker)
                                         .unwrap();
                                     if tx.retry {
-                                        txs_per_worker[RETRY_TXS] += 1;
+                                        txs_per_worker.retried += 1;
                                     } else {
-                                        txs_per_worker[UNIQUE_TXS] += 1;
+                                        txs_per_worker.unique += 1;
                                         self.scheduling_summary.unique_txs += 1;
                                     }
-                                    txs_per_worker[TOTAL_TXS] += 1;
+                                    txs_per_worker.total += 1;
                                     self.scheduling_summary.total_txs += 1;
                                     v.1.push(tx);
                                     v.0 = v.0.saturating_sub(cost_of_tx);

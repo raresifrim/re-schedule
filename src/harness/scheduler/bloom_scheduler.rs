@@ -1,10 +1,7 @@
 use crate::harness::scheduler::scheduler::HarnessTransaction;
-use crate::harness::scheduler::scheduler::RETRY_TXS;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
-use crate::harness::scheduler::scheduler::TOTAL_TXS;
-use crate::harness::scheduler::scheduler::UNIQUE_TXS;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::WorkerId;
@@ -18,7 +15,6 @@ use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
 use std::hash::BuildHasher;
-use tracing::info;
 
 //number of tries to fill in the buffer to max capacity
 const NUM_INGEST_RETRIES: usize = 5;
@@ -81,7 +77,7 @@ impl BloomScheduler {
 
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
-            txs_per_worker.insert(i, [0u64; 4]);
+            txs_per_worker.insert(i, Default::default());
         }
         let scheduling_summary = SchedulingSummary {
             txs_per_worker,
@@ -216,11 +212,11 @@ impl BloomScheduler {
                 .txs_per_worker
                 .get_mut(&next_worker)
                 .unwrap();
-            report[TOTAL_TXS] += 1;
+            report.total += 1;
             if retry {
-                report[RETRY_TXS] += 1;
+                report.retried += 1;
             } else {
-                report[UNIQUE_TXS] += 1;
+                report.unique += 1;
                 self.scheduling_summary.unique_txs += 1;
             }
             self.scheduling_summary.total_txs += 1;
@@ -261,7 +257,7 @@ impl Scheduler for BloomScheduler {
                 Err(e) => {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
-                            if self.buffer.len() == 0 {
+                            if self.buffer.is_empty() {
                                 //info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }
@@ -275,7 +271,7 @@ impl Scheduler for BloomScheduler {
                 }
             };
 
-            if self.buffer.len() == 0 {
+            if self.buffer.is_empty() {
                 continue;
             }
 

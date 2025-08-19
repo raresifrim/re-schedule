@@ -128,6 +128,7 @@ pub struct Config {
     pub batch_size: u64,
     pub slot_duration: u64,
     pub num_workers: u64,
+    pub num_report_locks: usize,
     pub simulate: bool,
 }
 
@@ -137,6 +138,7 @@ impl Config {
         network_type: NetworkType,
         scheduler_type: SchedulerType,
         simulate: bool,
+        // TODO: Convert to partial_config
         // CLI Overrides (passed from main)
         cli_num_txs: Option<u64>,
         cli_batch_size: Option<u64>,
@@ -179,13 +181,9 @@ impl Config {
             None => network_config.num_txs,
         };
 
-        let batch_size = cli_batch_size.or(Some(network_config.batch_size)).unwrap();
-        let slot_duration = cli_slot_duration
-            .or(Some(network_config.slot_duration))
-            .unwrap();
-        let num_workers = cli_num_workers
-            .or(Some(network_config.num_workers))
-            .unwrap();
+        let batch_size = cli_batch_size.unwrap_or(network_config.batch_size);
+        let slot_duration = cli_slot_duration.unwrap_or(network_config.slot_duration);
+        let num_workers = cli_num_workers.unwrap_or(network_config.num_workers);
         Ok(Self {
             start_snapshot,
             network_type,
@@ -195,6 +193,8 @@ impl Config {
             batch_size,
             slot_duration,
             num_workers,
+            // TODO: Overrides
+            num_report_locks: 10,
             simulate,
         })
     }

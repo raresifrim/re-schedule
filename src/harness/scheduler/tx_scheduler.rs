@@ -1,5 +1,5 @@
 use crate::harness::scheduler::scheduler::{
-    SATURATION, Scheduler, SchedulingSummary, TOTAL_TXS, Work,
+    Scheduler, SchedulingSummary, Work,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
@@ -28,7 +28,7 @@ where
             let schedule_resp = self
                 .scheduler
                 .schedule(&self.work_issuer, &self.work_executors);
-            if let Err(e) = schedule_resp {
+            if schedule_resp.is_err() {
                 //scheduler should return errors such as channels disconnected
                 //in which case we should end its execution
                 info!("Channel disconnected");
@@ -38,9 +38,9 @@ where
             let mut summary = self.scheduler.get_summary();
             for worker_index in 0..self.work_executors.len() {
                 let report = summary.txs_per_worker.get_mut(&worker_index).unwrap();
-                let txs_per_worker = report[TOTAL_TXS] as f64;
+                let txs_per_worker = report.total as f64;
                 let total_txs = summary.total_txs as f64;
-                report[SATURATION] = ((txs_per_worker / total_txs) * 100.0) as u64;
+                report.work_share = (txs_per_worker / total_txs) * 100.0;
             }
 
             summary

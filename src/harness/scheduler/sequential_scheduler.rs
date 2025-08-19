@@ -3,7 +3,6 @@ use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
-use crate::harness::scheduler::scheduler::{RETRY_TXS, TOTAL_TXS, UNIQUE_TXS};
 use ahash::HashMap;
 use ahash::HashMapExt;
 use crossbeam_channel::{Receiver, Sender};
@@ -35,12 +34,12 @@ impl Scheduler for SequentialScheduler {
                 Ok(tx) => {
                     if let WorkEntry::SingleTx(tx) = tx.entry {
                         if tx.retry {
-                            txs_per_worker[RETRY_TXS] += 1;
+                            txs_per_worker.retried += 1;
                         } else {
-                            txs_per_worker[UNIQUE_TXS] += 1;
+                            txs_per_worker.unique += 1;
                             self.scheduling_summary.unique_txs += 1;
                         }
-                        txs_per_worker[TOTAL_TXS] += 1;
+                        txs_per_worker.total += 1;
                         self.scheduling_summary.total_txs += 1;
                         if let Err(e) = execution_channels[worker_id].send(Work {
                             entry: WorkEntry::SingleTx(tx),
@@ -66,7 +65,7 @@ impl Scheduler for SequentialScheduler {
 impl SequentialScheduler {
     pub fn new() -> Self {
         let mut txs_per_worker = HashMap::with_capacity(1);
-        txs_per_worker.insert(0, [0u64; 4]);
+        txs_per_worker.insert(0, Default::default());
         let scheduling_summary = SchedulingSummary {
             txs_per_worker,
             unique_txs: 0,

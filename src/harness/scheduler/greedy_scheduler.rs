@@ -4,7 +4,6 @@ use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
-use crate::harness::scheduler::scheduler::{RETRY_TXS, TOTAL_TXS, UNIQUE_TXS};
 use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadId;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadSet;
@@ -17,7 +16,6 @@ use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tracing::info;
 
 /// Dead-simple scheduler that is efficient and will attempt to schedule
 /// in priority order, scheduling anything that can be immediately
@@ -45,7 +43,7 @@ impl GreedyScheduler {
     ) -> Self {
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
-            txs_per_worker.insert(i, [0u64; 4]);
+            txs_per_worker.insert(i, Default::default());
         }
 
         let scheduling_summary = SchedulingSummary {
@@ -130,11 +128,11 @@ impl GreedyScheduler {
                         .txs_per_worker
                         .get_mut(&thread_id)
                         .unwrap();
-                    report[TOTAL_TXS] += 1;
+                    report.total += 1;
                     if retry {
-                        report[RETRY_TXS] += 1;
+                        report.retried += 1;
                     } else {
-                        report[UNIQUE_TXS] += 1;
+                        report.unique += 1;
                         self.scheduling_summary.unique_txs += 1;
                     }
 
@@ -247,7 +245,7 @@ impl Scheduler for GreedyScheduler {
                 Err(e) => {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
-                            if self.container.len() == 0 {
+                            if self.container.is_empty() {
                                 //info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }

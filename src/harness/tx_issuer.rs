@@ -14,9 +14,9 @@ pub struct TxIssuer<Tx> {
     summary: TxIssuerSummary,
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TxIssuerSummary {
-    /// number of txs received at the begining of the reschedule operation
+    /// number of txs received at the beginning of the reschedule operation
     num_initial_txs: usize,
     /// total number of txs that were completely executed, either directly or via retry
     num_txs_executed: usize,
@@ -53,9 +53,9 @@ where
     }
 
     pub fn run(mut self) -> std::thread::JoinHandle<TxIssuerSummary> {
-        let handle = std::thread::spawn(move || self.issue_txs());
+        
         //return handle
-        handle
+        std::thread::spawn(move || self.issue_txs())
     }
 
     fn issue_txs(&mut self) -> TxIssuerSummary {
@@ -112,8 +112,8 @@ where
                                     }
                                     WorkEntry::MultipleTxs(mut txs) => {
                                         self.summary.num_txs_retried += txs.len();
-                                        while !txs.is_empty() {
-                                            let mut tx = txs.pop().unwrap();
+                                        while let Some(mut tx) = txs.pop() {
+                                            
                                             tx.retry = true;
                                             self.transactions.push_back(tx);
                                         }
