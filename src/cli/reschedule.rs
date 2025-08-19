@@ -60,25 +60,25 @@ pub struct RescheduleArgs {
     #[arg(short, long, value_parser=clap::value_parser!(u64).range(10..))]
     pub transactions: Option<u64>,
 
-    /// Scheduler type
-    #[arg(long, value_enum, default_value = "bloom")]
-    pub scheduler_type: Option<SchedulerType>,
+    /// Scheduler type, can be either `bloom` (default), `roundrobin` or `greedy`
+    #[arg(long, short = 's', value_enum, default_value = "bloom")]
+    pub scheduler_type: SchedulerType,
 
     /// Scheduler transaction batch size
-    #[arg(long, default_value = "64")]
+    #[arg(long)]
     pub batch_size: Option<u64>,
 
     /// Slot allowed time in ms
-    #[arg(long, default_value = "400")]
+    #[arg(long)]
     pub slot_duration: Option<u64>,
 
     /// Number of thread workers
-    #[arg(long, default_value = "4")]
+    #[arg(long, short = 'w')]
     pub num_workers: Option<u64>,
 
-    /// Whether to simulate the tx execution following a gaussian distribution model
+    /// Whether to simulate the tx execution following a Gaussian distribution model
     /// or to execute it directly via the SVM
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true)]
     pub simulate: bool,
 }
 
@@ -89,7 +89,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     let mut config = Config::load_from_json(
         &args.config_path,
         args.network,
-        args.scheduler_type.unwrap(),
+        args.scheduler_type,
         args.simulate,
         args.transactions,
         args.batch_size,
