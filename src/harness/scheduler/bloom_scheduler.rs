@@ -1,33 +1,29 @@
 use crate::harness::scheduler::scheduler::HarnessTransaction;
+use crate::harness::scheduler::scheduler::RETRY_TXS;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
-use crate::harness::scheduler::scheduler::Work;
-use crate::harness::scheduler::scheduler::WorkEntry;
-use crate::harness::scheduler::scheduler::RETRY_TXS;
 use crate::harness::scheduler::scheduler::TOTAL_TXS;
 use crate::harness::scheduler::scheduler::UNIQUE_TXS;
+use crate::harness::scheduler::scheduler::Work;
+use crate::harness::scheduler::scheduler::WorkEntry;
+use crate::harness::scheduler::scheduler::WorkerId;
 use ahash::{HashMap, HashMapExt};
 use bloom_1x::bloom::Bloom1X;
 use bloom_1x::bloom::QueryResult;
 use crossbeam_channel::{Receiver, Sender};
+use itertools::{EitherOrBoth::*, Itertools};
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
-use ahash::AHasher;
-use std::hash::Hasher;
-use std::hash::Hash;
+use std::hash::BuildHasher;
+use rapidhash::fast::RapidBuildHasher;
 use tracing::info;
-use crate::harness::scheduler::scheduler::WorkerId;
-use itertools::{
-    Itertools,
-    EitherOrBoth::*,
-};
 
 //number of tries to fill in the buffer to max capacity
 const NUM_INGEST_RETRIES: usize = 5;
 //maximum number of accounts that a tx can use
-const MAX_NUM_TX_ACCOUNTS:usize = 64;
+const MAX_NUM_TX_ACCOUNTS: usize = 64;
 
 pub struct BloomScheduler {
     num_workers: usize,
@@ -40,16 +36,15 @@ pub struct BloomScheduler {
     /// structure to hold the current txs to be scheduled to each worker
     work_lanes: HashMap<WorkerId, Vec<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>>,
     /// results from querying the Read and Write filters for each account of a tx
-    /// only one set needed as we iterate over each conflicting family sequentially 
+    /// only one set needed as we iterate over each conflicting family sequentially
     r_query_results: Vec<QueryResult>,
     w_query_results: Vec<QueryResult>,
     /// local filter used to get query results for accounts of current processed tx
     local_filter: Bloom1X,
     /// last block hash seen, used to track when filter flushing should be performed
     recent_blockhash: u64,
-    scheduling_summary: SchedulingSummary
+    scheduling_summary: SchedulingSummary,
 }
-
 
 struct ConflictFamily {
     read_filter: Bloom1X,
@@ -82,7 +77,7 @@ impl BloomScheduler {
         let work_lanes = HashMap::with_capacity(num_workers);
 
         let r_query_results = Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
-        let w_query_results= Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
+        let w_query_results = Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
 
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
@@ -104,7 +99,7 @@ impl BloomScheduler {
             w_query_results,
             local_filter,
             recent_blockhash: 0,
-            scheduling_summary
+            scheduling_summary,
         }
     }
 
@@ -115,32 +110,36 @@ impl BloomScheduler {
         }
     }
 
-    fn schedule_burst(&mut self) {        
+    fn schedule_burst(&mut self, hasher: rapidhash::inner::RapidBuildHasher<false, true>) {
+        
         //save worker that should receive the scheduled work
         let mut next_worker: usize = self.num_workers;
+        
         while let Some(harness_tx) = self.buffer.pop_front() {
+            
             //if we arrived here, we are sure that there is at least a tx inside the buffer
             //get read and write accounts stated in the tx
             let tx_accounts = harness_tx.transaction.get_account_locks_unchecked();
+            
             for write_account in tx_accounts.writable.iter() {
                 // hasher finish does not reset the internal state so we must recreate the hasher each time
-                let mut hasher = AHasher::default();
-                hasher.write(write_account.as_array());
-                let index = hasher.finish();
-                let write_filter_result = self.local_filter.search_u64(index);
+                let index = hasher.hash_one(write_account);
+                let write_filter_result = self.conflict_families[0].read_filter.search_u64(index);
                 self.w_query_results.push(write_filter_result);
             }
 
             for read_account in tx_accounts.readonly.iter() {
-                let mut hasher = AHasher::default();
-                hasher.write(read_account.as_array());
-                let index = hasher.finish();
-                let read_filter_result = self.local_filter.search_u64(index);
+                let index = hasher.hash_one(read_account);
+                let read_filter_result = self.conflict_families[0].read_filter.search_u64(index);
                 self.r_query_results.push(read_filter_result);
             }
 
             let mut and_result = 0;
-            'main_loop: for pair in self.w_query_results.iter().zip_longest(self.r_query_results.iter()) {
+            'main_loop: for pair in self
+                .w_query_results
+                .iter()
+                .zip_longest(self.r_query_results.iter())
+            {
                 //iterate over each conflict family until the current tx account sets intersect with the conflict families
                 for (worker_index, cf) in self.conflict_families.iter().enumerate() {
                     match pair {
@@ -154,11 +153,11 @@ impl BloomScheduler {
                             let waw_hazard = cf.write_filter.query_by_result(w);
                             let war_hazard = cf.read_filter.query_by_result(w);
                             and_result |= war_hazard | waw_hazard;
-                        },
+                        }
                         Right(r) => {
                             let raw_hazard = cf.write_filter.query_by_result(r);
                             and_result |= raw_hazard;
-                        },
+                        }
                     }
                     if and_result == 1 {
                         //found conflict within current family
@@ -168,28 +167,43 @@ impl BloomScheduler {
                 }
             }
 
-            
             if and_result == 0 {
-                //if no filter had a match on the provided account then any worker can take work 
+                //if no filter had a match on the provided account then any worker can take work
                 //in this case employ a round-robin scheduling where we balance the work
                 next_worker = (next_worker + 1) % self.num_workers;
             }
 
-            self.r_query_results.iter().for_each(|read_result| {
-                self.conflict_families[next_worker]
-                    .read_filter
-                    .update_filter(read_result);
-            });
+            for pair in self
+                .w_query_results
+                .iter()
+                .zip_longest(self.r_query_results.iter())
+            {
+                match pair {
+                    Both(w, r) => {
+                        self.conflict_families[next_worker]
+                            .write_filter
+                            .update_filter(w);
 
-            self.w_query_results.iter().for_each(|write_result|{
-                self.conflict_families[next_worker]
-                    .write_filter
-                    .update_filter(write_result);
-            });
+                        self.conflict_families[next_worker]
+                            .read_filter
+                            .update_filter(r);
+                    }
+                    Left(w) => {
+                        self.conflict_families[next_worker]
+                            .write_filter
+                            .update_filter(w);
+                    }
+                    Right(r) => {
+                        self.conflict_families[next_worker]
+                            .read_filter
+                            .update_filter(r);
+                    }
+                }
+            }
 
             self.r_query_results.clear();
             self.w_query_results.clear();
-            
+
             let retry = harness_tx.retry;
             let mut v = vec![harness_tx];
             self.work_lanes
@@ -199,7 +213,11 @@ impl BloomScheduler {
                 })
                 .or_insert(v);
 
-            let report = self.scheduling_summary.txs_per_worker.get_mut(&next_worker).unwrap();
+            let report = self
+                .scheduling_summary
+                .txs_per_worker
+                .get_mut(&next_worker)
+                .unwrap();
             report[TOTAL_TXS] += 1;
             if retry {
                 report[RETRY_TXS] += 1;
@@ -208,9 +226,7 @@ impl BloomScheduler {
                 self.scheduling_summary.unique_txs += 1;
             }
             self.scheduling_summary.total_txs += 1;
-
         }
-        
     }
 }
 
@@ -224,7 +240,7 @@ impl Scheduler for BloomScheduler {
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
         let mut current_buffer_len = 0;
-
+        let hasher: rapidhash::inner::RapidBuildHasher<false, true> = RapidBuildHasher::new(420);
         loop {
             //STAGE 1: Ingest txs from the TxIssuer
             //quickly check if there are new incoming txs
@@ -280,7 +296,7 @@ impl Scheduler for BloomScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            self.schedule_burst();
+            self.schedule_burst(hasher);
             num_retries = NUM_INGEST_RETRIES;
 
             //STAGE 3: send the current scheduled txs to the workers
@@ -310,5 +326,4 @@ impl Scheduler for BloomScheduler {
     fn get_summary(&self) -> SchedulingSummary {
         self.scheduling_summary.clone()
     }
-
 }
