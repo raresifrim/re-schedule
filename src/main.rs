@@ -22,23 +22,18 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Reschedule(args) => {
             cli::reschedule::run_schedule(args).await?;
-            ()
         }
         Commands::DownloadSnapshot(args) => {
             cli::download::run_download_single_snapshot(args).await?;
-            ()
         }
         Commands::DownloadBlocks(args) => {
             cli::download::run_download_blocks(args).await?;
-            ()
         }
         Commands::DownloadTransactions(args) => {
             cli::download::run_download_transactions(args).await?;
-            ()
         }
         Commands::DownloadAll(args) => {
             cli::download::run(args).await?;
-            ()
         }
     };
 

@@ -74,30 +74,27 @@ impl Scheduler for RoundRobinScheduler {
                                 CostModel::calculate_cost(&tx.transaction, &self.bank.feature_set)
                                     .sum();
                             let current_entry = self.rr_distribution.entry(self.last_worker);
-                            current_entry.and_modify(
-                                |v| {
-                                    // TODO: Ask Alex how to make this clousure re-usable?
-                                    let txs_per_worker = self
-                                        .scheduling_summary
-                                        .txs_per_worker
-                                        .get_mut(&self.last_worker)
-                                        .unwrap();
-                                    if tx.retry {
-                                        txs_per_worker[RETRY_TXS] += 1;
-                                    } else {
-                                        txs_per_worker[UNIQUE_TXS] += 1;
-                                        self.scheduling_summary.unique_txs += 1;
-                                    }
-                                    txs_per_worker[TOTAL_TXS] += 1;
-                                    self.scheduling_summary.total_txs += 1;
-                                    v.1.push(tx);
-                                    v.0 = v.0.saturating_sub(cost_of_tx);
-                                    if v.0 == 0 {
-                                        self.last_worker =
-                                            (self.last_worker + 1) % self.num_workers;
-                                    }
-                                },
-                            );
+                            current_entry.and_modify(|v| {
+                                // TODO: Ask Alex how to make this clousure re-usable?
+                                let txs_per_worker = self
+                                    .scheduling_summary
+                                    .txs_per_worker
+                                    .get_mut(&self.last_worker)
+                                    .unwrap();
+                                if tx.retry {
+                                    txs_per_worker[RETRY_TXS] += 1;
+                                } else {
+                                    txs_per_worker[UNIQUE_TXS] += 1;
+                                    self.scheduling_summary.unique_txs += 1;
+                                }
+                                txs_per_worker[TOTAL_TXS] += 1;
+                                self.scheduling_summary.total_txs += 1;
+                                v.1.push(tx);
+                                v.0 = v.0.saturating_sub(cost_of_tx);
+                                if v.0 == 0 {
+                                    self.last_worker = (self.last_worker + 1) % self.num_workers;
+                                }
+                            });
                         }
                         WorkEntry::MultipleTxs(txs) => {
                             //quite naive way of balancing multiple txs to the workers
@@ -177,7 +174,7 @@ impl Scheduler for RoundRobinScheduler {
                         crossbeam_channel::TryRecvError::Empty => {
                             //if no more work is available, check if there is something to send right away to not waste execution time
                             let mut num_scheduled = 0;
-                            for (worker_index, (cuant, txs)) in self.rr_distribution.drain() {
+                            for (worker_index, (_, txs)) in self.rr_distribution.drain() {
                                 let num_txs = txs.len();
                                 if num_txs == 0 {
                                     //nothing to send for this worker

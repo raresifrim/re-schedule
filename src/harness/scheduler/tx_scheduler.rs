@@ -1,5 +1,5 @@
 use crate::harness::scheduler::scheduler::{
-    HarnessTransaction, SATURATION, Scheduler, SchedulingSummary, TOTAL_TXS, Work,
+    SATURATION, Scheduler, SchedulingSummary, TOTAL_TXS, Work,
 };
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;

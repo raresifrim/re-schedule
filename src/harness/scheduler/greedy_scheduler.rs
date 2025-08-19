@@ -294,15 +294,13 @@ impl Scheduler for GreedyScheduler {
                         let account_keys = tx.transaction.account_keys();
                         let write_account_locks =
                             account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                tx.transaction
-                                .is_writable(index)
-                                .then_some(key)
+                                tx.transaction.is_writable(index).then_some(key)
                             });
                         let read_account_locks =
                             account_keys.iter().enumerate().filter_map(|(index, key)| {
                                 (!tx.transaction.is_writable(index)).then_some(key)
                             });
-                        
+
                         //unlock accounts now so we can schedule next round of txs
                         self.account_locks.unlock_accounts(
                             write_account_locks,

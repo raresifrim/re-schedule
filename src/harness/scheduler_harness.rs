@@ -1,7 +1,6 @@
 use crate::harness::scheduler::scheduler::{
     HarnessTransaction, RETRY_TXS, SATURATION, Scheduler, TOTAL_TXS, UNIQUE_TXS,
 };
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::harness::scheduler::tx_scheduler::TxScheduler;
 use crate::harness::tx_executor::{SharedAccountLocks, TxExecutor};
 use crate::harness::tx_issuer::TxIssuer;
@@ -9,7 +8,7 @@ use crate::utils::config::Config;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use solana_runtime::bank::Bank;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 pub struct SchedulerHarness<S>
 where

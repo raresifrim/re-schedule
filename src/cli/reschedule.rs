@@ -2,7 +2,6 @@ use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
-use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::sequential_scheduler::SequentialScheduler;
 use crate::harness::scheduler_harness::SchedulerHarness;
 use crate::utils::config::Config;
@@ -13,8 +12,8 @@ use ahash::AHasher;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use clap::Parser;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 use solana_account::AccountSharedData;
 use solana_account::from_account;
@@ -129,22 +128,20 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
     info!("Initializing scheduler harness");
     match config.scheduler_type {
-        SchedulerType::Bloom => { //128KB filter
+        SchedulerType::Bloom => {
+            //128KB filter
             let k = 2;
             let w = 64;
             let l = 16384;
             let scheduler = BloomScheduler::new(
-                config.num_workers as usize, 
-                k, //number of hashes 
+                config.num_workers as usize,
+                k, //number of hashes
                 l, //filter length
                 w, //filter row width in bits
-                config.batch_size as usize);
-            let scheduler_harness = SchedulerHarness::new_from_config(
-                config,
-                scheduler,
-                transactions,
-                start_bank,
-            )?;
+                config.batch_size as usize,
+            );
+            let scheduler_harness =
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
 
             info!("Starting scheduler harness");
@@ -156,14 +153,10 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 start_bank.clone(),
                 config.num_workers as usize,
                 config.batch_size as usize,
-                MAX_COMPUTE_UNIT_LIMIT as u64
+                MAX_COMPUTE_UNIT_LIMIT as u64,
             );
-            let scheduler_harness = SchedulerHarness::new_from_config(
-                config,
-                scheduler,
-                transactions,
-                start_bank,
-            )?;
+            let scheduler_harness =
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
 
             info!("Starting scheduler harness");
@@ -172,12 +165,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         }
         SchedulerType::PrioGraph => {
             let scheduler = SequentialScheduler::new();
-            let scheduler_harness = SchedulerHarness::new_from_config(
-                config,
-                scheduler,
-                transactions,
-                start_bank,
-            )?;
+            let scheduler_harness =
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness");
 
             info!("Starting scheduler harness");
@@ -187,12 +176,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         SchedulerType::Sequential => {
             let scheduler = SequentialScheduler::new();
             config.num_workers = 1; //in sequential mode we only use one worker for executing txs
-            let scheduler_harness = SchedulerHarness::new_from_config(
-                config,
-                scheduler,
-                transactions,
-                start_bank,
-            )?;
+            let scheduler_harness =
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness with Sequential scheduler");
 
             info!("Starting scheduler harness");
@@ -203,12 +188,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             let cu_quant = MAX_COMPUTE_UNIT_LIMIT as u64;
             let scheduler =
                 RoundRobinScheduler::new(config.num_workers as usize, cu_quant, start_bank.clone());
-            let scheduler_harness = SchedulerHarness::new_from_config(
-                config,
-                scheduler,
-                transactions,
-                start_bank,
-            )?;
+            let scheduler_harness =
+                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?;
             info!("Initialized scheduler harness with RoundRobin Scheduler");
 
             info!("Starting scheduler harness");
@@ -289,7 +270,7 @@ fn load_runtime_transactions(
                             account_overrides: AccountOverrides::default(),
                             simulated_ex_us: Some(v),
                             blockhash,
-                            retry: false
+                            retry: false,
                         };
                         transactions.push_back(final_tx);
                     }
@@ -315,7 +296,6 @@ fn load_runtime_transactions(
             }
         }
 
-        
         if transactions.len() == num_txs {
             break;
         }
@@ -352,7 +332,7 @@ pub fn build_sanitized_transaction(
         account_overrides: accounts,
         simulated_ex_us: None,
         blockhash: 0,
-        retry: false
+        retry: false,
     })
 }
 

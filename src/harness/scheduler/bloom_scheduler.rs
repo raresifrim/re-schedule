@@ -13,11 +13,11 @@ use bloom_1x::bloom::Bloom1X;
 use bloom_1x::bloom::QueryResult;
 use crossbeam_channel::{Receiver, Sender};
 use itertools::{EitherOrBoth::*, Itertools};
+use rapidhash::fast::RapidBuildHasher;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
 use std::hash::BuildHasher;
-use rapidhash::fast::RapidBuildHasher;
 use tracing::info;
 
 //number of tries to fill in the buffer to max capacity
@@ -111,16 +111,14 @@ impl BloomScheduler {
     }
 
     fn schedule_burst(&mut self, hasher: rapidhash::inner::RapidBuildHasher<false, true>) {
-        
         //save worker that should receive the scheduled work
         let mut next_worker: usize = self.num_workers;
-        
+
         while let Some(harness_tx) = self.buffer.pop_front() {
-            
             //if we arrived here, we are sure that there is at least a tx inside the buffer
             //get read and write accounts stated in the tx
             let tx_accounts = harness_tx.transaction.get_account_locks_unchecked();
-            
+
             for write_account in tx_accounts.writable.iter() {
                 // hasher finish does not reset the internal state so we must recreate the hasher each time
                 let index = hasher.hash_one(write_account);
