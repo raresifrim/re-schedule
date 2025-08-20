@@ -47,6 +47,9 @@ struct ConflictFamily {
     write_filter: Bloom1X,
 }
 
+// TODO: Unit benchmarks for false positive fail rate
+// TODO: Identify size of batch
+// TODO: Size of burst
 impl BloomScheduler {
     /// create a Bloom-based Scheduler where one single hash (XooDoo-NC) function is used with state size equal to 96 bits
     /// k -> number of hashes to extract from main hash digest
@@ -122,6 +125,7 @@ impl BloomScheduler {
                 self.w_query_results.push(write_filter_result);
             }
 
+            // TODO: suspicious
             for read_account in tx_accounts.readonly.iter() {
                 let index = hasher.hash_one(read_account);
                 let read_filter_result = self.conflict_families[0].read_filter.search_u64(index);
@@ -161,6 +165,7 @@ impl BloomScheduler {
                 }
             }
 
+            // TODO: Maybe greedy semantics
             if and_result == 0 {
                 //if no filter had a match on the provided account then any worker can take work
                 //in this case employ a round-robin scheduling where we balance the work
@@ -195,6 +200,7 @@ impl BloomScheduler {
                 }
             }
 
+            // TODO: Maybe bug
             self.r_query_results.clear();
             self.w_query_results.clear();
 
