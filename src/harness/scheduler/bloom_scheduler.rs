@@ -32,11 +32,8 @@ pub struct BloomScheduler {
     /// structure to hold the current txs to be scheduled to each worker
     work_lanes: HashMap<WorkerId, Vec<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>>,
     /// results from querying the Read and Write filters for each account of a tx
-    /// only one set needed as we iterate over each conflicting family sequentially
     r_query_results: Vec<QueryResult>,
     w_query_results: Vec<QueryResult>,
-    /// local filter used to get query results for accounts of current processed tx
-    local_filter: Bloom1X,
     /// last block hash seen, used to track when filter flushing should be performed
     recent_blockhash: u64,
     scheduling_summary: SchedulingSummary,
@@ -67,7 +64,6 @@ impl BloomScheduler {
             };
             conflict_families.push(conflict_family);
         }
-        let local_filter = Bloom1X::new(k, l, w, 96);
 
         let buffer =
             VecDeque::<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>::with_capacity(
@@ -96,7 +92,6 @@ impl BloomScheduler {
             work_lanes,
             r_query_results,
             w_query_results,
-            local_filter,
             recent_blockhash: 0,
             scheduling_summary,
         }

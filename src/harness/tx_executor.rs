@@ -35,6 +35,26 @@ use std::time::Duration;
 use std::time::Instant;
 use support::SharedAccountLocks;
 use tracing::info;
+
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TxExecutorSummary {
+    /// u64 types are provided as time in micros
+    /// work time represents the time spent executing unique txs successfuly
+    work_time_us: u64,
+    /// idle time represents the time spent waiting for txs
+    idle_time_us: u64,
+    /// retry time represents the time spent executing failed txs again
+    retry_time_us: u64,
+    /// total time is the time elapsed since the spawn of the thread until its exit (in secs)
+    total_time_secs: f64,
+    /// saturation of worker in regard of unique txs that got successfully executed
+    real_saturation: f64,
+    /// saturation of worker in regard of unique + retried txs (total work) that got successfully executed
+    theoretical_saturation: f64,
+    ///percentage of how much time was spent on executing unique txs out of the total amount of work time
+    unique_workload_saturation: f64
+}
+
 /// Message: [Worker -> Issuer]
 /// Processed transactions.
 pub struct FinishedWork<Tx> {
@@ -52,6 +72,7 @@ pub struct TxExecutor<Tx> {
     bank: Arc<Bank>,
     //simulate execution time provided inside tx instead of actually executing it
     simulate: bool,
+    summary: TxExecutorSummary
 }
 
 impl<Tx> TxExecutor<Tx>
@@ -71,28 +92,44 @@ where
             completed_work_sender,
             bank,
             simulate,
+            summary: TxExecutorSummary { 
+                work_time_us: 0, 
+                idle_time_us: 0, 
+                retry_time_us: 0,
+                ..Default::default()
+            }
         }
     }
 
     #[tracing::instrument(skip(self, account_locks))]
     pub fn run(
-        self,
+        mut self,
         account_locks: Option<Arc<Mutex<SharedAccountLocks>>>,
-    ) -> std::thread::JoinHandle<()> {
+    ) -> std::thread::JoinHandle<TxExecutorSummary> {
         std::thread::spawn(move || {
             if self.simulate {
-                self.execute_txs(account_locks.unwrap());
+                self.execute_txs(account_locks.unwrap())
             } else {
                 //create a dummy lock that will not be used for real execution
                 let empty_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
-                self.execute_txs(empty_locks);
+                self.execute_txs(empty_locks)
             }
         })
     }
 
     #[tracing::instrument(skip(self, account_locks))]
-    fn execute_txs(&self, account_locks: Arc<Mutex<SharedAccountLocks>>) {
-        while let Ok(work) = self.work_receiver.recv() {
+    fn execute_txs(&mut self, account_locks: Arc<Mutex<SharedAccountLocks>>) -> TxExecutorSummary {
+        
+        let global_start_time = Instant::now();
+        
+        loop {
+            
+            let local_time_start = Instant::now();
+            let work = match self.work_receiver.recv(){
+                Ok(w) => w,
+                Err(_) => break 
+            };
+            
             tracing::debug!("Received new batch of work...");
 
             let mut harness_transactions = vec![];
@@ -101,12 +138,14 @@ where
                 WorkEntry::MultipleTxs(txs) => harness_transactions = txs,
             }
 
-            let processed_output =
+            self.summary.idle_time_us += local_time_start.elapsed().as_micros() as u64;
+
+            let (processed_output, execution_times) =
                 self.process_transactions_one_by_one(&harness_transactions, &account_locks);
 
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
-            for (processed_result, tx) in processed_output.iter().zip(harness_transactions) {
+            for ((index, processed_result), tx) in processed_output.iter().enumerate().zip(harness_transactions) {
                 match processed_result.as_ref() {
                     Ok(pt) => {
                         match pt.status() {
@@ -116,6 +155,13 @@ where
                                     sig = ?tx.transaction.signature(),
                                     "Execute success",
                                 );
+                                
+                                if tx.retry {
+                                    self.summary.retry_time_us += execution_times[index];
+                                } else {
+                                    self.summary.work_time_us += execution_times[index];
+                                }
+                                
                                 completed_txs.push(tx);
                             }
                             Err(e) => {
@@ -125,6 +171,7 @@ where
                                     // sig = ?tx.transaction.signature(),
                                     "Execution failed",
                                 );
+                                self.summary.idle_time_us += execution_times[index];
                                 failed_txs.push(tx);
                             }
                         };
@@ -136,6 +183,7 @@ where
                             tx.transaction.signature(),
                             e
                         );
+                        self.summary.idle_time_us += execution_times[index];
                         failed_txs.push(tx);
                     }
                 };
@@ -165,15 +213,23 @@ where
             }
             tracing::debug!("Transaction executed and result sent back for recording");
         }
+
+        let global_end_time = global_start_time.elapsed().as_secs_f64();
+        self.summary.total_time_secs = global_end_time;
+        self.summary.real_saturation = self.summary.work_time_us as f64 / (self.summary.work_time_us + self.summary.retry_time_us + self.summary.idle_time_us) as f64 * 100.0;
+        self.summary.theoretical_saturation = (self.summary.work_time_us + self.summary.retry_time_us) as f64 / (self.summary.work_time_us + self.summary.retry_time_us + self.summary.idle_time_us) as f64 * 100.0;
+        self.summary.unique_workload_saturation = self.summary.work_time_us as f64 / (self.summary.work_time_us + self.summary.retry_time_us) as f64 * 100.0;
+        self.summary.clone()
     }
 
     fn process_transactions_one_by_one(
         &self,
         harness_transactions: &[HarnessTransaction<Tx>],
         account_locks: &Arc<Mutex<SharedAccountLocks>>,
-    ) -> Vec<Result<ProcessedTransaction>> {
+    ) -> (Vec<Result<ProcessedTransaction>>, Vec<u64>) {
         let mut actual_execute_time: u64 = 0;
         let mut transaction_results = vec![];
+        let mut transaction_times= vec![];
 
         for tx in harness_transactions {
             let tx_result;
@@ -189,6 +245,7 @@ where
                     self.process_single_transaction(&tx.transaction, &tx.account_overrides);
             }
             transaction_results.extend(tx_result);
+            transaction_times.push(tx_time);
             actual_execute_time += tx_time;
         }
 
@@ -199,7 +256,7 @@ where
         );
 
         //return execution result
-        transaction_results
+        (transaction_results, transaction_times)
     }
 
     fn process_single_transaction(

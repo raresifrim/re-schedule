@@ -1,5 +1,6 @@
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
 use crate::harness::scheduler::tx_scheduler::TxScheduler;
+use crate::harness::tx_executor::TxExecutorSummary;
 use crate::harness::tx_executor::{TxExecutor, support::SharedAccountLocks};
 use crate::harness::tx_issuer::TxIssuer;
 use crate::utils::config::Config;
@@ -92,8 +93,9 @@ where
             }
         }
 
+        let mut executor_summaries = vec![];
         for h in harness_hdls {
-            h.join().unwrap();
+            executor_summaries.push(h.join().unwrap());
         }
 
         let issuer_summary = issuer_handle.join().unwrap();
@@ -109,6 +111,7 @@ where
         RunSummary {
             scheduling: scheduling_summary,
             issuer: issuer_summary,
+            executors: executor_summaries,
             read_locks,
             write_locks,
         }
@@ -120,6 +123,7 @@ where
 pub struct RunSummary {
     scheduling: SchedulingSummary,
     issuer: TxIssuerSummary,
+    executors: Vec<TxExecutorSummary>,
     read_locks: LockSummary,
     write_locks: LockSummary,
 }
