@@ -123,7 +123,7 @@ where
 pub struct RunSummary {
     scheduling: SchedulingSummary,
     issuer: TxIssuerSummary,
-    executors: Vec<TxExecutorSummary>,
+    pub executors: Vec<TxExecutorSummary>,
     read_locks: LockSummary,
     write_locks: LockSummary,
 }

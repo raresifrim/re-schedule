@@ -25,9 +25,9 @@ pub struct TxIssuerSummary {
     /// total execution time measured from the tx issuer perspective
     total_exec_time: f64,
     /// throughput as unique txs executed over execution time as txs/s
-    real_tx_throughput: f64,
+    useful_tx_throughput: f64,
     /// throughput as total amount txs executed over execution time as txs/s
-    theoretical_tx_throughput: f64,
+    raw_tx_throughput: f64,
 }
 
 impl<Tx> TxIssuer<Tx>
@@ -187,8 +187,8 @@ where
         let end_time = start_time.elapsed().as_secs_f64();
         self.summary.total_exec_time = end_time;
         self.summary.num_txs_executed += self.summary.num_txs_retried;
-        self.summary.real_tx_throughput = self.summary.num_initial_txs as f64 / end_time;
-        self.summary.theoretical_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
+        self.summary.useful_tx_throughput = self.summary.num_initial_txs as f64 / end_time;
+        self.summary.raw_tx_throughput = self.summary.num_txs_executed as f64 / end_time;
         self.summary.clone()
     }
 }

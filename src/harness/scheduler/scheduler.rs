@@ -56,7 +56,7 @@ pub struct SchedulingSummary {
     /// 4. saturation per worker
     pub txs_per_worker: HashMap<WorkerId, WorkerSummary>,
     /// total unique txs scheduled among all workers
-    pub unique_txs: u64,
+    pub useful_txs: u64,
     /// total txs scheduled among all workers
     pub total_txs: u64,
 }

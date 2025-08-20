@@ -37,7 +37,7 @@ impl Scheduler for SequentialScheduler {
                             txs_per_worker.retried += 1;
                         } else {
                             txs_per_worker.unique += 1;
-                            self.scheduling_summary.unique_txs += 1;
+                            self.scheduling_summary.useful_txs += 1;
                         }
                         txs_per_worker.total += 1;
                         self.scheduling_summary.total_txs += 1;
@@ -68,7 +68,7 @@ impl SequentialScheduler {
         txs_per_worker.insert(0, Default::default());
         let scheduling_summary = SchedulingSummary {
             txs_per_worker,
-            unique_txs: 0,
+            useful_txs: 0,
             total_txs: 0,
         };
         Self { scheduling_summary }

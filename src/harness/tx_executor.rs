@@ -39,20 +39,24 @@ use tracing::info;
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TxExecutorSummary {
     /// u64 types are provided as time in micros
+    /// execution time regardless of txs regardless if they are unique, retried and if they succeeded or failed
+    pub execution_time_us: u64,
     /// work time represents the time spent executing unique txs successfuly
-    work_time_us: u64,
-    /// idle time represents the time spent waiting for txs
-    idle_time_us: u64,
+    pub work_time_us: u64,
+    /// idle time represents the time spent waiting for txs + time spent on failed account locks
+    pub idle_time_us: u64,
     /// retry time represents the time spent executing failed txs again
-    retry_time_us: u64,
+    pub retry_time_us: u64,
     /// total time is the time elapsed since the spawn of the thread until its exit (in secs)
-    total_time_secs: f64,
+    pub total_time_secs: f64,
     /// saturation of worker in regard of unique txs that got successfully executed
-    real_saturation: f64,
+    pub real_saturation: f64,
     /// saturation of worker in regard of unique + retried txs (total work) that got successfully executed
-    theoretical_saturation: f64,
+    pub raw_saturation: f64,
     ///percentage of how much time was spent on executing unique txs out of the total amount of work time
-    unique_workload_saturation: f64
+    pub useful_workload_saturation: f64,
+    /// how many txs we get duting the waiting for receive time
+    pub txs_received_per_sec: f64,
 }
 
 /// Message: [Worker -> Issuer]
@@ -96,6 +100,8 @@ where
                 work_time_us: 0, 
                 idle_time_us: 0, 
                 retry_time_us: 0,
+                execution_time_us: 0,
+                txs_received_per_sec: 0.0,
                 ..Default::default()
             }
         }
@@ -119,12 +125,13 @@ where
 
     #[tracing::instrument(skip(self, account_locks))]
     fn execute_txs(&mut self, account_locks: Arc<Mutex<SharedAccountLocks>>) -> TxExecutorSummary {
-        
-        let global_start_time = Instant::now();
+
+        let mut total_txs: usize = 0;
+        let mut receive_time_sec = 0.0;
         
         loop {
             
-            let local_time_start = Instant::now();
+            let loop_time_start = Instant::now();
             let work = match self.work_receiver.recv(){
                 Ok(w) => w,
                 Err(_) => break 
@@ -138,10 +145,15 @@ where
                 WorkEntry::MultipleTxs(txs) => harness_transactions = txs,
             }
 
-            self.summary.idle_time_us += local_time_start.elapsed().as_micros() as u64;
+            let receive_duration = loop_time_start.elapsed();
+            self.summary.idle_time_us += receive_duration.as_micros() as u64;
+            total_txs += harness_transactions.len();
+            receive_time_sec += receive_duration.as_secs_f64();
 
+            let execution_time = Instant::now();
             let (processed_output, execution_times) =
                 self.process_transactions_one_by_one(&harness_transactions, &account_locks);
+            self.summary.execution_time_us += execution_time.elapsed().as_micros() as u64;
 
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
@@ -211,14 +223,15 @@ where
                 info!("Tx issuer not present anymore, exiting as well...");
                 break;
             }
+            let loop_end_time = loop_time_start.elapsed().as_secs_f64();
+            self.summary.total_time_secs += loop_end_time;
             tracing::debug!("Transaction executed and result sent back for recording");
         }
 
-        let global_end_time = global_start_time.elapsed().as_secs_f64();
-        self.summary.total_time_secs = global_end_time;
-        self.summary.real_saturation = self.summary.work_time_us as f64 / (self.summary.work_time_us + self.summary.retry_time_us + self.summary.idle_time_us) as f64 * 100.0;
-        self.summary.theoretical_saturation = (self.summary.work_time_us + self.summary.retry_time_us) as f64 / (self.summary.work_time_us + self.summary.retry_time_us + self.summary.idle_time_us) as f64 * 100.0;
-        self.summary.unique_workload_saturation = self.summary.work_time_us as f64 / (self.summary.work_time_us + self.summary.retry_time_us) as f64 * 100.0;
+        self.summary.txs_received_per_sec = total_txs as f64 / receive_time_sec;
+        self.summary.real_saturation = self.summary.work_time_us as f64 / self.summary.execution_time_us as f64 * 100.0;
+        self.summary.raw_saturation = (self.summary.work_time_us + self.summary.retry_time_us) as f64 / self.summary.execution_time_us as f64 * 100.0;
+        self.summary.useful_workload_saturation = self.summary.work_time_us as f64 / (self.summary.work_time_us + self.summary.retry_time_us) as f64 * 100.0;
         self.summary.clone()
     }
 

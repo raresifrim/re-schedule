@@ -4,6 +4,7 @@ use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkEntry;
+use crate::harness::scheduler::scheduler::WorkerId;
 use ahash::{HashMap, HashMapExt};
 use crossbeam_channel::{Receiver, Sender};
 use solana_cost_model::cost_model::CostModel;
@@ -17,7 +18,7 @@ pub struct RoundRobinScheduler {
     bank: Arc<Bank>,
     num_workers: usize,
     rr_distribution: HashMap<
-        usize,
+        WorkerId,
         (
             u64,
             Vec<HarnessTransaction<<RoundRobinScheduler as Scheduler>::Tx>>,
@@ -40,7 +41,7 @@ impl RoundRobinScheduler {
         }
         let scheduling_summary = SchedulingSummary {
             txs_per_worker,
-            unique_txs: 0,
+            useful_txs: 0,
             total_txs: 0,
         };
         Self {
@@ -82,7 +83,7 @@ impl Scheduler for RoundRobinScheduler {
                                     txs_per_worker.retried += 1;
                                 } else {
                                     txs_per_worker.unique += 1;
-                                    self.scheduling_summary.unique_txs += 1;
+                                    self.scheduling_summary.useful_txs += 1;
                                 }
                                 txs_per_worker.total += 1;
                                 self.scheduling_summary.total_txs += 1;
@@ -113,7 +114,7 @@ impl Scheduler for RoundRobinScheduler {
                                         txs_per_worker.retried += 1;
                                     } else {
                                         txs_per_worker.unique += 1;
-                                        self.scheduling_summary.unique_txs += 1;
+                                        self.scheduling_summary.useful_txs += 1;
                                     }
                                     txs_per_worker.total += 1;
                                     self.scheduling_summary.total_txs += 1;

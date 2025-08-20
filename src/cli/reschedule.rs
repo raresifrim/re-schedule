@@ -3,6 +3,7 @@ use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::sequential_scheduler::SequentialScheduler;
+use crate::harness::scheduler_harness::RunSummary;
 use crate::harness::scheduler_harness::SchedulerHarness;
 use crate::utils::config::Config;
 use crate::utils::config::NetworkType;
@@ -12,6 +13,8 @@ use ahash::AHasher;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use clap::Parser;
+use itertools::max;
+use itertools::Itertools;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
@@ -124,7 +127,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
     info!("Initializing scheduler harness");
     // TODO: Refactor
-    let summary = match config.scheduler_type {
+    let mut summary = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler_harness = {
                 //128KB filter
@@ -197,7 +200,27 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&summary).expect("Failed to convert to JSON")
     );
+
+    recompute_execution_summaries(&mut summary);
+
     Ok(())
+}
+
+
+fn recompute_execution_summaries(summary: &mut RunSummary) {
+    let mut ex = summary.executors.clone();
+    let max_exec_time = ex.iter().max_by(|a, b| Ord::cmp(&a.execution_time_us, &b.execution_time_us)).unwrap().execution_time_us;
+    let ex = ex.iter_mut().map(|summary |{
+        summary.idle_time_us += max_exec_time - summary.execution_time_us;
+        summary.execution_time_us = max_exec_time;
+        summary.real_saturation = summary.work_time_us as f64 / max_exec_time as f64 * 100.0;
+        summary.raw_saturation = (summary.work_time_us + summary.retry_time_us) as f64 / max_exec_time as f64 * 100.0;
+        summary
+    }).collect_vec();
+     println!(
+        "Recomputed Bulk Execution Summaries{}",
+        serde_json::to_string_pretty(&ex).expect("Failed to convert to JSON")
+    );
 }
 
 fn load_runtime_transactions(
