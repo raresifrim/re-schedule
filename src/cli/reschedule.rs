@@ -13,13 +13,13 @@ use ahash::AHasher;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use clap::Parser;
-use itertools::max;
 use itertools::Itertools;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 use solana_account::AccountSharedData;
 use solana_account::from_account;
+use solana_cost_model::cost_model::CostModel;
 use solana_accounts_db::ancestors::Ancestors;
 use solana_message::AccountKeys;
 use solana_message::v0::LoadedAddresses;
@@ -187,6 +187,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                 let scheduler = RoundRobinScheduler::new(
                     config.num_workers as usize,
                     MAX_COMPUTE_UNIT_LIMIT as u64,
+                    config.batch_size as usize,
                     start_bank.clone(),
                 );
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
@@ -281,7 +282,8 @@ fn load_runtime_transactions(
                         //get a random simuation time
                         let v = gaussian_distr.sample(rng); //from_zscore(uniform_distr.sample(rng));
                         //convert it to micro_secs
-                        Some((v * 1000.0) as u64)
+                        //Some((v * 1000.0) as u64)
+                        Some(12000u64)
                     };
                     //generate the compressed blockhash
                     let blockhash = {
@@ -289,12 +291,14 @@ fn load_runtime_transactions(
                         hasher.finish()
                     };
                     //push tx
+                    let cu_cost =  CostModel::calculate_cost(&final_tx, &root_bank.feature_set).sum();
                     let final_tx = HarnessTransaction {
                         transaction: final_tx,
                         account_overrides: AccountOverrides::default(),
                         simulated_ex_us,
                         blockhash,
                         retry: false,
+                        cu_cost 
                     };
                     transactions.push_back(final_tx);
                 }
@@ -350,13 +354,14 @@ pub fn build_sanitized_transaction(
     //generate account overrides for re-executaion of transactions
     //this is for overcoming the AlreadyProcessed type of error
     let accounts = get_account_overrides_for_simulation(bank, &tx.account_keys());
-    //generate the compressed blockhash
+    let cu_cost =  CostModel::calculate_cost(&tx, &bank.feature_set).sum();
     Ok(HarnessTransaction {
         transaction: tx,
         account_overrides: accounts,
         simulated_ex_us: None,
         blockhash: 0,
         retry: false,
+        cu_cost
     })
 }
 

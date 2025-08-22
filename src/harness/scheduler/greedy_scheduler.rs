@@ -1,21 +1,25 @@
+use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
-use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadId;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadSet;
 use crate::harness::scheduler::thread_aware_account_locks::TryLockError;
+use crate::harness::scheduler::thread_aware_account_locks::select_thread;
+use crate::harness::scheduler::scheduler::WorkerId;
 use ahash::{HashMap, HashMapExt};
 use crossbeam_channel::{Receiver, Sender};
-use solana_cost_model::cost_model::CostModel;
+use itertools::Itertools;
 use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
+use tracing::info;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Dead-simple scheduler that is efficient and will attempt to schedule
 /// in priority order, scheduling anything that can be immediately
@@ -28,10 +32,9 @@ pub struct GreedyScheduler {
     working_account_set: ReadWriteAccountSet,
     unschedulables: VecDeque<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>,
     scheduling_summary: SchedulingSummary,
-    account_locks: ThreadAwareAccountLocks,
     container: VecDeque<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>,
-    batches: Batches<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>,
-    in_flight_tracker: InFlightTracker,
+    work_lanes: HashMap<WorkerId, Work<<GreedyScheduler as Scheduler>::Tx>>,
+    thread_trackers: Vec<Arc<ExecutionTracker>>,
 }
 
 impl GreedyScheduler {
@@ -56,6 +59,11 @@ impl GreedyScheduler {
             VecDeque::<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>::with_capacity(
                 batch_size,
             );
+        
+        let mut work_lanes = HashMap::with_capacity(num_workers);
+        for i in 0..num_workers {
+            work_lanes.insert(i, Work { entry: vec![], total_cus: 0 });
+        }
 
         Self {
             bank,
@@ -66,13 +74,13 @@ impl GreedyScheduler {
             unschedulables: VecDeque::with_capacity(batch_size),
             scheduling_summary,
             container,
-            batches: Batches::new(num_workers, batch_size / num_workers),
-            account_locks: ThreadAwareAccountLocks::new(num_workers),
-            in_flight_tracker: InFlightTracker::new(num_workers),
+            work_lanes,
+            //work trackers should be added through a separate function call defined by the Scheduler trait
+            thread_trackers: vec![],
         }
     }
 
-    fn get_next_txs(&mut self) {
+    fn get_next_txs(&mut self, account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>) {
         let num_threads = self.num_workers;
         let target_cu_per_thread = self.target_scheduled_cus / num_threads as u64;
         let mut schedulable_threads = ThreadSet::any(num_threads);
@@ -83,19 +91,19 @@ impl GreedyScheduler {
 
             // Should always be in the container, during initial testing phase panic.
             // Later, we can replace with a continue in case this does happen.
-            let Some(transaction_state) = self.container.pop_front() else {
+            let Some(harness_tx) = self.container.pop_front() else {
                 panic!("transaction state must exist")
             };
 
             if !self
                 .working_account_set
-                .check_locks(&transaction_state.transaction)
+                .check_locks(&harness_tx.transaction)
             {
                 tracing::debug!(
                     "Found exisitng lock on accounts of new popped tx, sending all txs out..."
                 );
                 self.working_account_set.clear();
-                self.container.push_back(transaction_state);
+                self.container.push_back(harness_tx);
                 // Push unschedulables back into the queue
                 self.container.append(&mut self.unschedulables);
                 //get back to parent function to send available txs in work_lanes
@@ -103,26 +111,33 @@ impl GreedyScheduler {
             }
 
             // Now check if the transaction can actually be scheduled.
-            match self.try_schedule_transaction(&transaction_state, schedulable_threads) {
+            match self.try_schedule_transaction(&harness_tx, schedulable_threads, account_locks) {
                 Err(TransactionSchedulingError::UnschedulableConflicts) => {
-                    self.unschedulables.push_back(transaction_state);
+                    self.unschedulables.push_back(harness_tx);
                 }
                 Err(TransactionSchedulingError::UnschedulableThread) => {
-                    self.unschedulables.push_back(transaction_state);
+                    self.unschedulables.push_back(harness_tx);
                 }
-                Ok(TransactionSchedulingInfo { thread_id, cost }) => {
+                Ok(thread_id ) => {
                     assert!(
                         self.working_account_set
-                            .take_locks(&transaction_state.transaction),
+                            .take_locks(&harness_tx.transaction),
                         "locks must be available"
                     );
 
-                    let retry = transaction_state.retry;
-                    self.scheduling_summary.total_txs += 1;
-                    self.batches
-                        .add_transaction_to_batch(thread_id, transaction_state, cost);
-                    tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
+                    let retry = harness_tx.retry;
+                    let cu_cost = harness_tx.cu_cost;
+                    let mut v = vec![harness_tx];
+                    self.work_lanes.entry(thread_id)
+                    .and_modify(|f| {
+                        f.entry.append(&mut v);
+                        f.total_cus += cu_cost;
+                    })
+                    .or_insert(Work { entry: v, total_cus: cu_cost });
 
+                    tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
+                    
+                    self.scheduling_summary.total_txs += 1;
                     let report = self
                         .scheduling_summary
                         .txs_per_worker
@@ -136,10 +151,12 @@ impl GreedyScheduler {
                         self.scheduling_summary.useful_txs += 1;
                     }
 
+                    let work_lane = self.work_lanes.get(&thread_id).unwrap();
+                    let total_cus = work_lane.total_cus;
+                    let workload = work_lane.entry.len();
+                    
                     // If target batch size is reached, send all the batches
-                    if self.batches.transactions()[thread_id].len()
-                        >= self.batch_size / self.num_workers
-                    {
+                    if workload >= self.batch_size / self.num_workers {
                         self.working_account_set.clear();
                         // Push unschedulables back into the queue
                         self.container.append(&mut self.unschedulables);
@@ -149,7 +166,7 @@ impl GreedyScheduler {
 
                     // if the thread is at target_cu_per_thread, remove it from the schedulable threads
                     // if there are no more schedulable threads, stop scheduling.
-                    if self.batches.total_cus()[thread_id] >= target_cu_per_thread {
+                    if total_cus >= target_cu_per_thread {
                         schedulable_threads.remove(thread_id);
                         if schedulable_threads.is_empty() {
                             break;
@@ -166,31 +183,34 @@ impl GreedyScheduler {
 
     fn try_schedule_transaction(
         &mut self,
-        transaction_state: &HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>,
+        harness_tx: &HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>,
         schedulable_threads: ThreadSet,
-    ) -> Result<TransactionSchedulingInfo, TransactionSchedulingError> {
-        let account_keys = transaction_state.transaction.account_keys();
+        account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>
+    ) -> Result<ThreadId, TransactionSchedulingError> {
+        
+        let account_keys = harness_tx.transaction.account_keys();
         let write_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-            transaction_state
+            harness_tx
                 .transaction
                 .is_writable(index)
                 .then_some(key)
-        });
+        }).collect_vec();
         let read_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-            (!transaction_state.transaction.is_writable(index)).then_some(key)
-        });
+            (!harness_tx.transaction.is_writable(index)).then_some(key)
+        }).collect_vec();
 
-        let thread_id = match self.account_locks.try_lock_accounts(
-            write_account_locks,
-            read_account_locks,
+        let mut mutex = account_locks.lock().unwrap();
+        let thread_id = match mutex.try_lock_accounts(
+            &write_account_locks,
+            &read_account_locks,
             schedulable_threads,
             |thread_set| {
-                select_thread(
+                select_thread::<Self>(
                     thread_set,
-                    self.batches.total_cus(),
-                    self.in_flight_tracker.cus_in_flight_per_thread(),
-                    self.batches.transactions(),
-                    self.in_flight_tracker.num_in_flight_per_thread(),
+                    &self.thread_trackers,
+                    &self.work_lanes,
+                    1,
+                    harness_tx.cu_cost
                 )
             },
         ) {
@@ -203,10 +223,8 @@ impl GreedyScheduler {
             }
         };
 
-        let cost =
-            CostModel::calculate_cost(&transaction_state.transaction, &self.bank.feature_set).sum();
-
-        Ok(TransactionSchedulingInfo { thread_id, cost })
+        
+        Ok(thread_id)
     }
 }
 
@@ -214,10 +232,16 @@ const NUM_INGEST_RETRIES: u8 = 5;
 
 impl Scheduler for GreedyScheduler {
     type Tx = RuntimeTransaction<SanitizedTransaction>;
+
+    fn add_thread_trackers(&mut self, execution_trackers: Vec<Arc<ExecutionTracker>>) {
+        self.thread_trackers = execution_trackers;
+    }
+
     fn schedule(
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
+        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
@@ -227,18 +251,11 @@ impl Scheduler for GreedyScheduler {
             //STAGE 1: Ingest txs from the TxIssuer
             //quickly check if there are new incoming txs
             match issue_channel.try_recv() {
-                Ok(tx) => {
+                Ok(work) => {
                     tracing::debug!("Received txs from TxIssuer");
-                    match tx.entry {
-                        WorkEntry::SingleTx(tx) => {
-                            self.container.push_back(tx);
-                        }
-                        WorkEntry::MultipleTxs(txs) => {
-                            for tx in txs {
-                                self.container.push_back(tx);
-                            }
-                        }
-                    };
+                    for tx in work.entry {
+                        self.container.push_back(tx);
+                    }
                 }
 
                 //error might be actualy just empty or a real error like disconnected
@@ -274,56 +291,28 @@ impl Scheduler for GreedyScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            self.get_next_txs();
+            self.get_next_txs(&account_locks);
             num_retries = NUM_INGEST_RETRIES;
             current_buffer_len = 0;
 
             //STAGE 3: send the current scheduled txs to the workers
-            let tmp = 0..self.num_workers;
-            for worker_index in tmp {
-                let (txs, total_cus) = self
-                    .batches
-                    .take_batch(worker_index, self.batch_size / self.num_workers);
-
-                if !txs.is_empty() {
-                    tracing::debug!("Sending {} txs to worker {}", txs.len(), worker_index);
-
-                    self.in_flight_tracker
-                        .track_batch(txs.len(), total_cus, worker_index);
-
-                    txs.iter().for_each(|tx| {
-                        let account_keys = tx.transaction.account_keys();
-                        let write_account_locks =
-                            account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                tx.transaction.is_writable(index).then_some(key)
-                            });
-                        let read_account_locks =
-                            account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                (!tx.transaction.is_writable(index)).then_some(key)
-                            });
-
-                        //unlock accounts now so we can schedule next round of txs
-                        self.account_locks.unlock_accounts(
-                            write_account_locks,
-                            read_account_locks,
-                            worker_index,
-                        );
-                    });
-
-                    match execution_channels[worker_index].send(Work {
-                        entry: WorkEntry::MultipleTxs(txs),
-                    }) {
-                        Ok(_) => {}
-                        Err(_) => {
-                            //for the moment we stop the entire execution if we see that one worker is not responding anymore
-                            //we don't have a safety mechanism to handle what happens when a worker gets disconnected
-                            return Err(SchedulerError::DisconnectedSendChannel(format!(
-                                "TxExecutor Channel {} got disconnected",
-                                worker_index
-                            )));
-                        }
-                    };
-                }
+            for worker_index in 0..self.num_workers {
+                match self.work_lanes.remove_entry(&worker_index) {
+                    Some(lane) => {
+                        match execution_channels[lane.0].send(lane.1) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                //for the moment we stop the entire execution if we see that one worker is not responding anymore
+                                //we don't have a safety mechanism to handle what happens when a worker gets disconnected
+                                return Err(SchedulerError::DisconnectedSendChannel(format!(
+                                    "TxExecutor Channel {} got disconnected",
+                                    worker_index
+                                )));
+                            }
+                        };
+                    }
+                    None => continue,
+                };
             }
         }
     }
@@ -413,55 +402,6 @@ impl ReadWriteAccountSet {
     }
 }
 
-#[derive(Debug)]
-pub struct Batches<Tx> {
-    transactions: Vec<Vec<Tx>>,
-    total_cus: Vec<u64>,
-}
-
-impl<Tx> Batches<Tx> {
-    pub fn new(num_threads: usize, target_num_transactions_per_batch: usize) -> Self {
-        Self {
-            transactions: (0..num_threads)
-                .map(|_| Vec::with_capacity(target_num_transactions_per_batch))
-                .collect(),
-            total_cus: vec![0; num_threads],
-        }
-    }
-
-    pub fn total_cus(&self) -> &[u64] {
-        &self.total_cus
-    }
-
-    pub fn transactions(&self) -> &[Vec<Tx>] {
-        &self.transactions
-    }
-
-    pub fn add_transaction_to_batch(&mut self, thread_id: ThreadId, transaction: Tx, cus: u64) {
-        self.transactions[thread_id].push(transaction);
-        self.total_cus[thread_id] += cus;
-    }
-
-    pub fn take_batch(
-        &mut self,
-        thread_id: ThreadId,
-        target_num_transactions_per_batch: usize,
-    ) -> (Vec<Tx>, u64) {
-        (
-            core::mem::replace(
-                &mut self.transactions[thread_id],
-                Vec::with_capacity(target_num_transactions_per_batch),
-            ),
-            core::mem::replace(&mut self.total_cus[thread_id], 0),
-        )
-    }
-}
-
-/// A transaction has been scheduled to a thread.
-pub struct TransactionSchedulingInfo {
-    pub thread_id: ThreadId,
-    pub cost: u64,
-}
 
 /// Error type for reasons a transaction could not be scheduled.
 pub enum TransactionSchedulingError {
@@ -470,137 +410,4 @@ pub enum TransactionSchedulingError {
     UnschedulableConflicts,
     /// Thread is not allowed to be scheduled on at this time.
     UnschedulableThread,
-}
-
-/// Given the schedulable `thread_set`, select the thread with the least amount
-/// of work queued up.
-/// Currently, "work" is just defined as the number of transactions.
-///
-/// If the `chain_thread` is available, this thread will be selected, regardless of
-/// load-balancing.
-///
-/// Panics if the `thread_set` is empty. This should never happen, see comment
-/// on `ThreadAwareAccountLocks::try_lock_accounts`.
-fn select_thread<Tx>(
-    thread_set: ThreadSet,
-    batch_cus_per_thread: &[u64],
-    in_flight_cus_per_thread: &[u64],
-    batches_per_thread: &[Vec<Tx>],
-    in_flight_per_thread: &[usize],
-) -> ThreadId {
-    thread_set
-        .contained_threads_iter()
-        .map(|thread_id| {
-            (
-                thread_id,
-                batch_cus_per_thread[thread_id] + in_flight_cus_per_thread[thread_id],
-                batches_per_thread[thread_id].len() + in_flight_per_thread[thread_id],
-            )
-        })
-        .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)))
-        .map(|(thread_id, _, _)| thread_id)
-        .unwrap()
-}
-
-/// Tracks the number of transactions that are in flight for each thread.
-#[derive(Debug)]
-pub struct InFlightTracker {
-    num_in_flight_per_thread: Vec<usize>,
-    cus_in_flight_per_thread: Vec<u64>,
-    batches: HashMap<TransactionBatchId, BatchEntry>,
-    batch_id_generator: BatchIdGenerator,
-}
-
-#[derive(Debug)]
-pub struct BatchEntry {
-    thread_id: ThreadId,
-    num_transactions: usize,
-    total_cus: u64,
-}
-
-impl InFlightTracker {
-    pub fn new(num_threads: usize) -> Self {
-        Self {
-            num_in_flight_per_thread: vec![0; num_threads],
-            cus_in_flight_per_thread: vec![0; num_threads],
-            batches: HashMap::new(),
-            batch_id_generator: BatchIdGenerator::default(),
-        }
-    }
-
-    /// Returns the number of transactions that are in flight for each thread.
-    pub fn num_in_flight_per_thread(&self) -> &[usize] {
-        &self.num_in_flight_per_thread
-    }
-
-    /// Returns the number of cus that are in flight for each thread.
-    pub fn cus_in_flight_per_thread(&self) -> &[u64] {
-        &self.cus_in_flight_per_thread
-    }
-
-    /// Tracks number of transactions and CUs in-flight for the `thread_id`.
-    /// Returns a `TransactionBatchId` that can be used to stop tracking the batch
-    /// when it is complete.
-    pub fn track_batch(
-        &mut self,
-        num_transactions: usize,
-        total_cus: u64,
-        thread_id: ThreadId,
-    ) -> TransactionBatchId {
-        let batch_id = self.batch_id_generator.next();
-        self.num_in_flight_per_thread[thread_id] += num_transactions;
-        self.cus_in_flight_per_thread[thread_id] += total_cus;
-        self.batches.insert(
-            batch_id,
-            BatchEntry {
-                thread_id,
-                num_transactions,
-                total_cus,
-            },
-        );
-
-        batch_id
-    }
-
-    /// Stop tracking the batch with given `batch_id`.
-    /// Removes the number of transactions for the scheduled thread.
-    /// Returns the thread id that the batch was scheduled on.
-    ///
-    /// # Panics
-    /// Panics if the batch id does not exist in the tracker.
-    pub fn complete_batch(&mut self, batch_id: TransactionBatchId) -> ThreadId {
-        let Some(BatchEntry {
-            thread_id,
-            num_transactions,
-            total_cus,
-        }) = self.batches.remove(&batch_id)
-        else {
-            panic!("batch id is not being tracked");
-        };
-        self.num_in_flight_per_thread[thread_id] -= num_transactions;
-        self.cus_in_flight_per_thread[thread_id] -= total_cus;
-
-        thread_id
-    }
-}
-
-#[derive(Default, Debug)]
-pub struct BatchIdGenerator {
-    next_id: u64,
-}
-
-impl BatchIdGenerator {
-    pub fn next(&mut self) -> TransactionBatchId {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_sub(1);
-        TransactionBatchId::new(id)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct TransactionBatchId(u64);
-impl TransactionBatchId {
-    pub fn new(index: u64) -> Self {
-        Self(index)
-    }
 }

@@ -1,13 +1,20 @@
-use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
-use crate::harness::tx_executor::FinishedWork;
+use crate::harness::executor::tx_executor::FinishedWork;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
+use itertools::Itertools;
+use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
-pub struct TxIssuer<Tx> {
+pub struct TxIssuer<Tx>
+where
+    Tx: TransactionWithMeta + Send + Sync + 'static,
+{
     transactions: VecDeque<HarnessTransaction<Tx>>,
     completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
     work_sender: Sender<Work<Tx>>,
@@ -32,7 +39,7 @@ pub struct TxIssuerSummary {
 
 impl<Tx> TxIssuer<Tx>
 where
-    Tx: Send + Sync + 'static,
+    Tx: TransactionWithMeta + Send + Sync + 'static,
 {
     pub fn new(
         completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
@@ -52,19 +59,19 @@ where
         }
     }
 
-    pub fn run(mut self) -> std::thread::JoinHandle<TxIssuerSummary> {
+    pub fn run(mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> std::thread::JoinHandle<TxIssuerSummary> {
         
         //return handle
-        std::thread::spawn(move || self.issue_txs())
+        std::thread::spawn(move || self.issue_txs(account_locks))
     }
 
-    fn issue_txs(&mut self) -> TxIssuerSummary {
+    fn issue_txs(&mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> TxIssuerSummary {
         //issuer will stop once it gets all transactions executed
         let mut num_txs = self.transactions.len();
 
         let start_time = Instant::now();
 
-        loop {
+        'main: loop {
             //multiplex between channels and check first that sends something
             let mut recv_selector = Select::new();
             for r in self.completed_work_receiver.as_slice() {
@@ -76,22 +83,38 @@ where
                 Err(_) => { /*No confirmation recived form any worker, moving on...*/ }
                 Ok(operation) => {
                     let worker_index = operation.index();
-                    //info!("Received work from worker {:?}", worker_index);
+                    tracing::debug!("Received work from worker {:?}", worker_index);
+                    
+                    //lock the mutex now and unlock accounts for all txs 
+                    let mut mutex = account_locks.lock().unwrap();
+                    
                     //try non-blocking receive to see if there were any blocked txs
                     //but only receive one at a time so that we issue it to the scheduler immediately
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
-                                match finished_work.completed_entry.unwrap() {
-                                    WorkEntry::SingleTx(_) => {
-                                        num_txs -= 1;
-                                        self.summary.num_txs_executed += 1;
-                                    }
-                                    WorkEntry::MultipleTxs(txs) => {
-                                        num_txs -= txs.len();
-                                        self.summary.num_txs_executed += txs.len();
-                                    }
-                                };
+                                
+                                let completed_work = finished_work.completed_entry.unwrap();
+                                num_txs -= completed_work.len();
+                                self.summary.num_txs_executed += completed_work.len();
+                                
+                                for harness_tx in completed_work {
+                                    let account_keys = harness_tx.transaction.account_keys();
+                                    
+                                    let write_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
+                                    harness_tx
+                                    .transaction
+                                    .is_writable(index)
+                                    .then_some(key)
+                                    }).collect_vec();
+                                    
+                                    let read_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
+                                        (!harness_tx.transaction.is_writable(index)).then_some(key)
+                                    }).collect_vec();
+                                    
+                                    mutex.unlock_accounts(&write_account_locks, &read_account_locks, worker_index);
+                                }
+                                
                                 tracing::debug!(
                                     "Successfully executed {}% of txs",
                                     (self.summary.num_initial_txs - num_txs) * 100
@@ -103,22 +126,27 @@ where
                                 tracing::debug!(
                                     "Found failed txs..pushing them back to queue for rescheduling"
                                 );
-                                let failed_work = finished_work.failed_entry.unwrap();
-                                match failed_work {
-                                    WorkEntry::SingleTx(mut tx) => {
-                                        tx.retry = true;
-                                        self.transactions.push_back(tx);
-                                        self.summary.num_txs_retried += 1;
-                                    }
-                                    WorkEntry::MultipleTxs(mut txs) => {
-                                        self.summary.num_txs_retried += txs.len();
-                                        while let Some(mut tx) = txs.pop() {
-                                            
-                                            tx.retry = true;
-                                            self.transactions.push_back(tx);
-                                        }
-                                    }
-                                };
+                                let mut failed_work = finished_work.failed_entry.unwrap();
+                                self.summary.num_txs_retried += failed_work.len();
+                                while let Some(mut harness_tx) = failed_work.pop() {
+                                    harness_tx.retry = true;
+                                    let account_keys = harness_tx.transaction.account_keys();
+                                    
+                                    let write_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
+                                    harness_tx
+                                    .transaction
+                                    .is_writable(index)
+                                    .then_some(key)
+                                    }).collect_vec();
+                                    
+                                    let read_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
+                                        (!harness_tx.transaction.is_writable(index)).then_some(key)
+                                    }).collect_vec();
+                                    
+                                    mutex.unlock_accounts(&write_account_locks, &read_account_locks, worker_index);
+
+                                    self.transactions.push_back(harness_tx);
+                                }
                             }
                         }
                         Err(_) => { /*"No completed work received yet"*/ }
@@ -148,35 +176,23 @@ where
                 }
                 let tx = maybe_tx.unwrap();
                 match self.work_sender.try_send(Work {
-                    entry: WorkEntry::SingleTx(tx),
+                    total_cus: tx.cu_cost,
+                    entry: vec![tx],
                 }) {
                     Ok(_) => tracing::debug!("Successfully issued another tx to the scheduler"),
                     Err(e) => {
                         match e {
                             //when full, we should push back our txs
-                            TrySendError::Full(tx) => {
-                                match tx.entry {
-                                    WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
-                                    WorkEntry::MultipleTxs(mut txs) => {
-                                        while let Some(element) = txs.pop() {
-                                            self.transactions.push_front(element);
-                                        }
-                                    }
-                                };
+                            TrySendError::Full(mut txs) => {
+                                while let Some(element) = txs.entry.pop() {
+                                    self.transactions.push_front(element);
+                                }
                                 info!("Scheduler channel is full, trying again later...");
                                 break;
                             }
-                            TrySendError::Disconnected(tx) => {
-                                match tx.entry {
-                                    WorkEntry::SingleTx(tx) => self.transactions.push_front(tx),
-                                    WorkEntry::MultipleTxs(mut txs) => {
-                                        while let Some(element) = txs.pop() {
-                                            self.transactions.push_front(element);
-                                        }
-                                    }
-                                };
+                            TrySendError::Disconnected(txs) => {
                                 info!("Scheduler channel got disconnected, ending issuer as well");
-                                break;
+                                break 'main;
                             }
                         }
                     }

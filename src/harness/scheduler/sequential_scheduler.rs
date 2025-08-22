@@ -2,9 +2,12 @@ use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
-use crate::harness::scheduler::scheduler::WorkEntry;
+use crate::harness::executor::execution_tracker::ExecutionTracker;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use ahash::HashMap;
 use ahash::HashMapExt;
+use std::sync::Mutex;
+use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
@@ -15,11 +18,16 @@ pub struct SequentialScheduler {
 
 impl Scheduler for SequentialScheduler {
     type Tx = RuntimeTransaction<SanitizedTransaction>;
+    fn add_thread_trackers(&mut self, _execution_trackers: Vec<std::sync::Arc<ExecutionTracker>>) {
+        //not needed in a sequntial scheduler
+        unimplemented!()
+    }
 
     fn schedule(
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
+        _account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         //this implements a dummy sequential scheduler for a single worker
         let worker_id = 0;
@@ -31,8 +39,8 @@ impl Scheduler for SequentialScheduler {
 
         loop {
             match issue_channel.recv() {
-                Ok(tx) => {
-                    if let WorkEntry::SingleTx(tx) = tx.entry {
+                Ok(work) => {
+                    for tx in &work.entry{
                         if tx.retry {
                             txs_per_worker.retried += 1;
                         } else {
@@ -41,15 +49,14 @@ impl Scheduler for SequentialScheduler {
                         }
                         txs_per_worker.total += 1;
                         self.scheduling_summary.total_txs += 1;
-                        if let Err(e) = execution_channels[worker_id].send(Work {
-                            entry: WorkEntry::SingleTx(tx),
-                        }) {
+                    }
+                        if let Err(e) = execution_channels[worker_id].send(work) {
                             return Err(SchedulerError::DisconnectedSendChannel(format!(
                                 "{:?}",
                                 e
                             )));
                         };
-                    };
+                    
                 }
                 Err(e) => return Err(SchedulerError::DisconnectedRecvChannel(format!("{:?}", e))),
             }

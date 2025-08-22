@@ -1,8 +1,10 @@
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
 use crate::harness::scheduler::tx_scheduler::TxScheduler;
-use crate::harness::tx_executor::TxExecutorSummary;
-use crate::harness::tx_executor::{TxExecutor, support::SharedAccountLocks};
+use crate::harness::executor::tx_executor::TxExecutorSummary;
+use crate::harness::executor::tx_executor::TxExecutor;
+use crate::harness::executor::shared_account_locks::{SharedAccountLocks,LockSummary};
 use crate::harness::tx_issuer::TxIssuer;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::utils::config::Config;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use solana_runtime::bank::Bank;
@@ -10,7 +12,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use super::scheduler::scheduler::SchedulingSummary;
-use super::tx_executor::support::LockSummary;
 use super::tx_issuer::TxIssuerSummary;
 
 pub struct SchedulerHarness<S>
@@ -53,22 +54,24 @@ where
             transactions,
         );
 
-        let tx_scheduler = TxScheduler {
-            scheduler,
-            work_issuer: scheduler_receiver_channel,
-            work_executors: schedule_to_execute_send_channels,
-        };
-
         let mut tx_executors = vec![];
         for i in 0..config.num_workers {
-            tx_executors.push(TxExecutor::new(
+            let thread_worker = TxExecutor::new(
                 i as usize,
                 execute_to_schedule_receive_channels[i as usize].clone(),
                 execute_to_issuer_send_channels[i as usize].clone(),
                 bank.clone(),
                 config.simulate,
-            ));
+            );
+            tx_executors.push(thread_worker);
         }
+
+       
+        let tx_scheduler = TxScheduler {
+            scheduler,
+            work_issuer: scheduler_receiver_channel,
+            work_executors: schedule_to_execute_send_channels,
+        };
 
         Ok(Self {
             config,
@@ -78,11 +81,20 @@ where
         })
     }
 
-    pub fn run(self) -> RunSummary {
+    pub fn run(mut self) -> RunSummary {
+
+        let mut trackers = vec![];
+        for thread_worker in &self.tx_executors {
+            let tracker = thread_worker.get_tracker_ref().clone();
+            trackers.push(tracker);
+        }
+        self.tx_scheduler.scheduler.add_thread_trackers(trackers);
+
         let mut harness_hdls = vec![];
-        //the issuer will return the overall summary of the executiom
-        let issuer_handle = self.tx_issuer.run();
-        let scheduler_handle = self.tx_scheduler.run();
+        //the issuer will return the overall summary of the execution
+        let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(self.config.num_workers as usize)));
+        let issuer_handle = self.tx_issuer.run(Arc::clone(&account_locks));
+        let scheduler_handle = self.tx_scheduler.run(Arc::clone(&account_locks));
 
         let account_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
         for ex in self.tx_executors {

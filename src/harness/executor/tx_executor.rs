@@ -2,11 +2,12 @@
     mismatched_lifetime_syntaxes,
     reason = "The lifetime is only named because inference is weak"
 )]
+use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::Work;
-use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadId;
 use crate::harness::scheduler::thread_aware_account_locks::TryLockError;
+use super::shared_account_locks::SharedAccountLocks;
 use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
@@ -33,8 +34,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use support::SharedAccountLocks;
 use tracing::info;
+
 
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TxExecutorSummary {
@@ -62,17 +63,20 @@ pub struct TxExecutorSummary {
 /// Message: [Worker -> Issuer]
 /// Processed transactions.
 pub struct FinishedWork<Tx> {
-    pub completed_entry: Option<WorkEntry<Tx>>,
-    pub failed_entry: Option<WorkEntry<Tx>>,
+    pub completed_entry: Option<Vec<HarnessTransaction<Tx>>>,
+    pub failed_entry: Option<Vec<HarnessTransaction<Tx>>>,
 }
 
 #[derive(Debug)]
 pub struct TxExecutor<Tx> {
     thread_id: ThreadId,
-    //channel to receive txs from TxScheduler
+    /// channel to receive txs from TxScheduler
     work_receiver: Receiver<Work<Tx>>,
-    //channel to send txs and results of execution back to TxIssuer
+    /// channel to send txs and results of execution back to TxIssuer
     completed_work_sender: Sender<FinishedWork<Tx>>,
+    /// Structure that holds the current number of txs executed, amount of time spend executing them and total CUs
+    /// This is a common reference shared with the scheduler
+    tracker: Arc<ExecutionTracker>,
     bank: Arc<Bank>,
     //simulate execution time provided inside tx instead of actually executing it
     simulate: bool,
@@ -94,6 +98,7 @@ where
             thread_id,
             work_receiver,
             completed_work_sender,
+            tracker: Arc::new(ExecutionTracker::new()),
             bank,
             simulate,
             summary: TxExecutorSummary { 
@@ -105,6 +110,10 @@ where
                 ..Default::default()
             }
         }
+    }
+
+    pub fn get_tracker_ref(&self) -> Arc<ExecutionTracker> {
+        Arc::clone(&self.tracker)
     }
 
     #[tracing::instrument(skip(self, account_locks))]
@@ -139,76 +148,27 @@ where
             
             tracing::debug!("Received new batch of work...");
 
-            let mut harness_transactions = vec![];
-            match work.entry {
-                WorkEntry::SingleTx(tx) => harness_transactions.push(tx),
-                WorkEntry::MultipleTxs(txs) => harness_transactions = txs,
-            }
+            let harness_transactions = work.entry;
 
             let receive_duration = loop_time_start.elapsed();
             self.summary.idle_time_us += receive_duration.as_micros() as u64;
             total_txs += harness_transactions.len();
             receive_time_sec += receive_duration.as_secs_f64();
 
-            let execution_time = Instant::now();
-            let (processed_output, execution_times) =
-                self.process_transactions_one_by_one(&harness_transactions, &account_locks);
-            self.summary.execution_time_us += execution_time.elapsed().as_micros() as u64;
-
             let mut completed_txs = vec![];
             let mut failed_txs = vec![];
-            for ((index, processed_result), tx) in processed_output.iter().enumerate().zip(harness_transactions) {
-                match processed_result.as_ref() {
-                    Ok(pt) => {
-                        match pt.status() {
-                            Ok(_) => {
-                                tracing::debug!(
-                                    msg = ?tx.transaction.message_hash(),
-                                    sig = ?tx.transaction.signature(),
-                                    "Execute success",
-                                );
-                                
-                                if tx.retry {
-                                    self.summary.retry_time_us += execution_times[index];
-                                } else {
-                                    self.summary.work_time_us += execution_times[index];
-                                }
-                                
-                                completed_txs.push(tx);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    err = ?e,
-                                    msg = ?tx.transaction.message_hash(),
-                                    // sig = ?tx.transaction.signature(),
-                                    "Execution failed",
-                                );
-                                self.summary.idle_time_us += execution_times[index];
-                                failed_txs.push(tx);
-                            }
-                        };
-                    }
-                    Err(e) => {
-                        info!(
-                            "Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
-                            tx.transaction.message_hash(),
-                            tx.transaction.signature(),
-                            e
-                        );
-                        self.summary.idle_time_us += execution_times[index];
-                        failed_txs.push(tx);
-                    }
-                };
-            }
+            let execution_time = Instant::now();
+            self.process_transactions_one_by_one(harness_transactions, &account_locks, &mut completed_txs, &mut failed_txs);
+            self.summary.execution_time_us += execution_time.elapsed().as_micros() as u64;
 
             let completed_entries = match completed_txs.len() {
                 0 => None,
-                _ => Some(WorkEntry::MultipleTxs(completed_txs)),
+                _ => Some(completed_txs),
             };
 
             let failed_entries = match failed_txs.len() {
                 0 => None,
-                _ => Some(WorkEntry::MultipleTxs(failed_txs)),
+                _ => Some(failed_txs),
             };
 
             if self
@@ -236,16 +196,15 @@ where
     }
 
     fn process_transactions_one_by_one(
-        &self,
-        harness_transactions: &[HarnessTransaction<Tx>],
+        &mut self,
+        harness_transactions: Vec<HarnessTransaction<Tx>>,
         account_locks: &Arc<Mutex<SharedAccountLocks>>,
-    ) -> (Vec<Result<ProcessedTransaction>>, Vec<u64>) {
-        let mut actual_execute_time: u64 = 0;
-        let mut transaction_results = vec![];
-        let mut transaction_times= vec![];
-
+        completed_txs: &mut Vec<HarnessTransaction<Tx>>,
+        failed_txs: &mut Vec<HarnessTransaction<Tx>>,
+    ) {
+       
         for tx in harness_transactions {
-            let tx_result;
+            let mut tx_result;
             let tx_time;
             if self.simulate {
                 (tx_result, tx_time) = self.simulate_transaction(
@@ -257,19 +216,51 @@ where
                 (tx_result, tx_time) =
                     self.process_single_transaction(&tx.transaction, &tx.account_overrides);
             }
-            transaction_results.extend(tx_result);
-            transaction_times.push(tx_time);
-            actual_execute_time += tx_time;
+            match tx_result.pop().unwrap() {
+                Ok(pt) => {
+                        match pt.status() {
+                            Ok(_) => {
+                                tracing::debug!(
+                                    msg = ?tx.transaction.message_hash(),
+                                    sig = ?tx.transaction.signature(),
+                                    "Execute success",
+                                );
+                                self.tracker.update(1, tx_time, pt.executed_units());
+                                if tx.retry {
+                                    self.summary.retry_time_us += tx_time;
+                                } else {
+                                    self.summary.work_time_us += tx_time;
+                                }
+                                completed_txs.push(tx);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    err = ?e,
+                                    msg = ?tx.transaction.message_hash(),
+                                    // sig = ?tx.transaction.signature(),
+                                    "Execution failed",
+                                );
+                                self.tracker.update(0, tx_time, 0);
+                                self.summary.idle_time_us += tx_time;
+                                failed_txs.push(tx);
+                            }
+                        };
+                    }
+                    Err(e) => {
+                        info!(
+                            "Execution of transaction identified by message hash and signature: {:?}, {:?} failed with following details:{:?}",
+                            tx.transaction.message_hash(),
+                            tx.transaction.signature(),
+                            e
+                        );
+                        self.tracker.update(0, tx_time, 0);
+                        self.summary.idle_time_us += tx_time;
+                        failed_txs.push(tx);
+                    }
+            };
+
         }
 
-        tracing::debug!(
-            "Executed {} transactions in {} us",
-            harness_transactions.len(),
-            actual_execute_time
-        );
-
-        //return execution result
-        (transaction_results, transaction_times)
     }
 
     fn process_single_transaction(
@@ -395,206 +386,3 @@ where
     }
 }
 
-pub mod support {
-
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-    use crate::harness::scheduler::thread_aware_account_locks::TryLockError;
-    use ahash::AHashMap;
-    use itertools::Itertools as _;
-    use solana_pubkey::Pubkey;
-
-    pub struct SharedAccountLocks(AHashMap<Pubkey, AtomicAccountLock>);
-
-    #[derive(Debug)]
-    struct AtomicAccountLock {
-        lock_type: AtomicU8,
-        lock_counter: AtomicU64,
-        num_read_access: AtomicU64,
-        num_write_access: AtomicU64,
-    }
-
-    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-    pub struct AccountLockSummary {
-        lock_type: u8,
-        lock_counter: u64,
-        num_read_access: u64,
-        num_write_access: u64,
-    }
-
-    impl<'a> From<&'a AtomicAccountLock> for AccountLockSummary {
-        fn from(value: &'a AtomicAccountLock) -> Self {
-            Self {
-                lock_type: value.lock_type.load(Ordering::Relaxed),
-                lock_counter: value.lock_counter.load(Ordering::Relaxed),
-                num_read_access: value.num_read_access.load(Ordering::Relaxed),
-                num_write_access: value.num_write_access.load(Ordering::Relaxed),
-            }
-        }
-    }
-
-    const NO_LOCK: u8 = 0;
-    const READ_LOCK: u8 = 2;
-    const WRITE_LOCK: u8 = 1;
-
-    impl Default for AtomicAccountLock {
-        fn default() -> Self {
-            Self {
-                lock_type: AtomicU8::new(NO_LOCK),
-                lock_counter: AtomicU64::new(0),
-                num_read_access: AtomicU64::new(0),
-                num_write_access: AtomicU64::new(0),
-            }
-        }
-    }
-
-    #[must_use]
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct LockSummary(Vec<(Pubkey, AccountLockSummary)>);
-
-    impl SharedAccountLocks {
-        pub fn new() -> Self {
-            SharedAccountLocks(AHashMap::new())
-        }
-
-        pub fn try_lock_tx_accounts(
-            &mut self,
-            write_accounts: &[&Pubkey],
-            read_accounts: &[&Pubkey],
-        ) -> anyhow::Result<(), TryLockError> {
-            match self.check_tx_accounts(write_accounts, read_accounts) {
-                Ok(_) => {
-                    self.lock_tx_accounts(write_accounts, read_accounts);
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
-        }
-
-        pub fn check_tx_accounts(
-            &self,
-            write_accounts: &[&Pubkey],
-            read_accounts: &[&Pubkey],
-        ) -> anyhow::Result<(), TryLockError> {
-            for account in write_accounts {
-                if let Some(value) = self.0.get(account) {
-                    if value.lock_type.load(std::sync::atomic::Ordering::SeqCst) != NO_LOCK {
-                        return Err(TryLockError::MultipleConflicts);
-                    }
-                }
-            }
-
-            for account in read_accounts {
-                if let Some(value) = self.0.get(account) {
-                    if value.lock_type.load(std::sync::atomic::Ordering::SeqCst) == WRITE_LOCK {
-                        return Err(TryLockError::MultipleConflicts);
-                    }
-                }
-            }
-
-            Ok(())
-        }
-
-        pub fn lock_tx_accounts(&mut self, write_accounts: &[&Pubkey], read_accounts: &[&Pubkey]) {
-            for account in write_accounts {
-                self.0
-                    .entry(**account)
-                    .and_modify(|a| {
-                        a.lock_type
-                            .store(WRITE_LOCK, std::sync::atomic::Ordering::SeqCst);
-                        a.lock_counter.store(1, std::sync::atomic::Ordering::SeqCst);
-                        a.num_write_access
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    })
-                    .or_insert(AtomicAccountLock {
-                        lock_type: AtomicU8::new(WRITE_LOCK),
-                        lock_counter: AtomicU64::new(1),
-                        num_read_access: AtomicU64::new(0),
-                        num_write_access: AtomicU64::new(1),
-                    });
-            }
-
-            for account in read_accounts {
-                self.0
-                    .entry(**account)
-                    .and_modify(|a| {
-                        let previous_counter = a
-                            .lock_counter
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if previous_counter == 0 {
-                            a.lock_type
-                                .store(READ_LOCK, std::sync::atomic::Ordering::SeqCst);
-                        }
-                        a.num_read_access
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    })
-                    .or_insert(AtomicAccountLock {
-                        lock_type: AtomicU8::new(READ_LOCK),
-                        lock_counter: AtomicU64::new(1),
-                        num_read_access: AtomicU64::new(1),
-                        num_write_access: AtomicU64::new(0),
-                    });
-            }
-        }
-
-        pub fn unlock_tx_accounts(
-            &mut self,
-            write_accounts: &[&Pubkey],
-            read_accounts: &[&Pubkey],
-        ) {
-            for account in write_accounts {
-                self.0.entry(**account).and_modify(|a| {
-                    a.lock_type
-                        .store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
-                    a.lock_counter.store(0, std::sync::atomic::Ordering::SeqCst);
-                });
-            }
-
-            for account in read_accounts {
-                self.0.entry(**account).and_modify(|a| {
-                    let previous_counter = a
-                        .lock_counter
-                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    if previous_counter == 1 {
-                        a.lock_type
-                            .store(NO_LOCK, std::sync::atomic::Ordering::SeqCst);
-                    }
-                });
-            }
-        }
-
-        pub fn get_top_read_locks(&self, truncate: usize) -> LockSummary {
-            let top = self
-                .0
-                .iter()
-                // TODO: May be expensive `memcpy`
-                .map(|(a, b)| (*a, b.into()))
-                .sorted_unstable_by(
-                    |a: &(Pubkey, AccountLockSummary), b: &(Pubkey, AccountLockSummary)| {
-                        // In descending order
-                        Ord::cmp(&b.1.num_read_access, &a.1.num_read_access)
-                    },
-                )
-                .take(truncate)
-                .collect_vec();
-            LockSummary(top)
-        }
-
-        pub fn get_top_write_locks(&self, truncate: usize) -> LockSummary {
-            let top = self
-                .0
-                .iter()
-                // TODO: May be expensive `memcpy`
-                .map(|(a, b)| (*a, b.into()))
-                .sorted_unstable_by(
-                    |a: &(Pubkey, AccountLockSummary), b: &(Pubkey, AccountLockSummary)| {
-                        // In descending order
-                        Ord::cmp(&b.1.num_write_access, &a.1.num_write_access)
-                    },
-                )
-                .take(truncate)
-                .collect_vec();
-            LockSummary(top)
-        }
-    }
-}

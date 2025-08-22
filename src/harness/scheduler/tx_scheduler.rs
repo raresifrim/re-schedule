@@ -1,8 +1,11 @@
 use crate::harness::scheduler::scheduler::{
     Scheduler, SchedulingSummary, Work,
 };
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct TxScheduler<S>
@@ -21,13 +24,13 @@ impl<S> TxScheduler<S>
 where
     S: Scheduler + Send + Sync + 'static,
 {
-    pub fn run(mut self) -> std::thread::JoinHandle<SchedulingSummary> {
+    pub fn run(mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> std::thread::JoinHandle<SchedulingSummary> {
         std::thread::spawn(move || {
             // the schedulers' schedule function should implement the loop
             // that receives txs until the channel becomes empty or disconnected
             let schedule_resp = self
                 .scheduler
-                .schedule(&self.work_issuer, &self.work_executors);
+                .schedule(&self.work_issuer, &self.work_executors, account_locks);
             if schedule_resp.is_err() {
                 //scheduler should return errors such as channels disconnected
                 //in which case we should end its execution

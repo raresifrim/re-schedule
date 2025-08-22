@@ -31,7 +31,7 @@
       "start_snapshot": "snapshot-92635810-GECPzCtBx93zDwJvi2cPXPjV11r9yT4sRnK2vPpWVajm.tar.zst"
     },
     "testnet": {
-      "batch_size": 64,
+      "batch_size": 16,
       "genesis_folder": "testnet",
       "num_blocks": 300,
       "num_txs": 418872,

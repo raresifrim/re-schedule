@@ -1,10 +1,12 @@
+use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::SchedulerError;
 use crate::harness::scheduler::scheduler::SchedulingSummary;
 use crate::harness::scheduler::scheduler::Work;
-use crate::harness::scheduler::scheduler::WorkEntry;
 use crate::harness::scheduler::scheduler::WorkerId;
+use crate::harness::scheduler::thread_aware_account_locks::select_thread;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadSet;
 use ahash::{HashMap, HashMapExt};
 use bloom_1x::bloom::Bloom1X;
 use bloom_1x::bloom::QueryResult;
@@ -15,6 +17,9 @@ use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
 use std::hash::BuildHasher;
+use std::sync::Arc;
+use std::sync::Mutex;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 
 //number of tries to fill in the buffer to max capacity
 const NUM_INGEST_RETRIES: usize = 5;
@@ -28,14 +33,13 @@ pub struct BloomScheduler {
     /// number of txs to collect before starting ti schedule
     batch_size: usize,
     /// local buffer to accumulate multiple txs for burst mode
-    buffer: VecDeque<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>,
+    container: VecDeque<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>,
     /// structure to hold the current txs to be scheduled to each worker
-    work_lanes: HashMap<WorkerId, Vec<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>>,
+    work_lanes: HashMap<WorkerId, Work<<BloomScheduler as Scheduler>::Tx>>,
     /// results from querying the Read and Write filters for each account of a tx
     r_query_results: Vec<QueryResult>,
     w_query_results: Vec<QueryResult>,
-    /// last block hash seen, used to track when filter flushing should be performed
-    recent_blockhash: u64,
+    thread_trackers: Vec<Arc<ExecutionTracker>>,
     scheduling_summary: SchedulingSummary,
 }
 
@@ -53,7 +57,6 @@ impl BloomScheduler {
     /// l -> number of rows per bloom filter
     /// w -> width of row inside bloom filter
     /// each scheduler maintains a read and write filter per each worker
-    /// mode -> stream txs one after the other as soon as possible, or wait for larger burst of txs
     pub fn new(num_workers: usize, k: usize, l: usize, w: usize, batch_size: usize) -> Self {
         let mut conflict_families = vec![];
 
@@ -65,10 +68,11 @@ impl BloomScheduler {
             conflict_families.push(conflict_family);
         }
 
-        let buffer =
+        let container =
             VecDeque::<HarnessTransaction<<BloomScheduler as Scheduler>::Tx>>::with_capacity(
                 batch_size,
             );
+        
         let work_lanes = HashMap::with_capacity(num_workers);
 
         let r_query_results = Vec::with_capacity(MAX_NUM_TX_ACCOUNTS);
@@ -88,11 +92,11 @@ impl BloomScheduler {
             num_workers,
             conflict_families,
             batch_size,
-            buffer,
+            container,
             work_lanes,
             r_query_results,
             w_query_results,
-            recent_blockhash: 0,
+            thread_trackers: vec![],
             scheduling_summary,
         }
     }
@@ -104,11 +108,11 @@ impl BloomScheduler {
         }
     }
 
-    fn schedule_burst(&mut self, hasher: rapidhash::inner::RapidBuildHasher<false, true>) {
+    fn schedule_burst(&mut self, hasher: rapidhash::inner::RapidBuildHasher<false, true>, schedulable_threads: ThreadSet ) {
         //save worker that should receive the scheduled work
         let mut next_worker: usize = self.num_workers;
 
-        while let Some(harness_tx) = self.buffer.pop_front() {
+        while let Some(harness_tx) = self.container.pop_front() {
             //if we arrived here, we are sure that there is at least a tx inside the buffer
             //get read and write accounts stated in the tx
             let tx_accounts = harness_tx.transaction.get_account_locks_unchecked();
@@ -160,11 +164,16 @@ impl BloomScheduler {
                 }
             }
 
-            // TODO: Maybe greedy semantics
             if and_result == 0 {
                 //if no filter had a match on the provided account then any worker can take work
                 //in this case employ a round-robin scheduling where we balance the work
-                next_worker = (next_worker + 1) % self.num_workers;
+                next_worker = select_thread::<Self>(
+                            schedulable_threads,
+                            &self.thread_trackers,
+                            &self.work_lanes,
+                            1,
+                            harness_tx.cu_cost,
+                        );
             }
 
             for pair in self
@@ -200,13 +209,15 @@ impl BloomScheduler {
             self.w_query_results.clear();
 
             let retry = harness_tx.retry;
+            let cu_cost = harness_tx.cu_cost;
             let mut v = vec![harness_tx];
-            self.work_lanes
-                .entry(next_worker)
+
+            self.work_lanes.entry(next_worker)
                 .and_modify(|f| {
-                    f.append(&mut v);
+                    f.entry.append(&mut v);
+                    f.total_cus += cu_cost;
                 })
-                .or_insert(v);
+                .or_insert(Work { entry: v, total_cus: cu_cost });
 
             let report = self
                 .scheduling_summary
@@ -227,38 +238,38 @@ impl BloomScheduler {
 
 impl Scheduler for BloomScheduler {
     type Tx = RuntimeTransaction<SanitizedTransaction>;
+
+    fn add_thread_trackers(&mut self, execution_trackers: Vec<std::sync::Arc<ExecutionTracker>>) {
+        self.thread_trackers = execution_trackers;
+    }
+
     fn schedule(
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
+        _account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
         let mut current_buffer_len = 0;
         let hasher: rapidhash::inner::RapidBuildHasher<false, true> = RapidBuildHasher::new(420);
+        let schedulable_threads = ThreadSet::any(self.num_workers);
         loop {
             //STAGE 1: Ingest txs from the TxIssuer
             //quickly check if there are new incoming txs
             match issue_channel.try_recv() {
-                Ok(tx) => {
+                Ok(txs) => {
                     tracing::debug!("Received txs from TxIssuer");
-                    match tx.entry {
-                        WorkEntry::SingleTx(tx) => {
-                            self.buffer.push_back(tx);
-                        }
-                        WorkEntry::MultipleTxs(txs) => {
-                            for tx in txs {
-                                self.buffer.push_back(tx);
-                            }
-                        }
-                    };
+                    for tx in txs.entry {
+                        self.container.push_back(tx);   
+                    }
                 }
 
                 //error might be actualy just empty or a real error like disconnected
                 Err(e) => {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
-                            if self.buffer.is_empty() {
+                            if self.container.is_empty() {
                                 //info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }
@@ -272,15 +283,15 @@ impl Scheduler for BloomScheduler {
                 }
             };
 
-            if self.buffer.is_empty() {
+            if self.container.is_empty() {
                 continue;
             }
 
             //STAGE 2: Check and schedule accumulated txs in the local buffer
-            if self.buffer.len() <= self.batch_size {
+            if self.container.len() <= self.batch_size {
                 //not enough work
-                if current_buffer_len < self.buffer.len() {
-                    current_buffer_len = self.buffer.len();
+                if current_buffer_len < self.container.len() {
+                    current_buffer_len = self.container.len();
                 } else {
                     //if we still have same buffered txs subtract the number or retries
                     num_retries -= 1;
@@ -291,16 +302,14 @@ impl Scheduler for BloomScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            self.schedule_burst(hasher);
+            self.schedule_burst(hasher, schedulable_threads);
             num_retries = NUM_INGEST_RETRIES;
 
             //STAGE 3: send the current scheduled txs to the workers
             for worker_index in 0..self.num_workers {
                 match self.work_lanes.remove_entry(&worker_index) {
                     Some(lane) => {
-                        match execution_channels[lane.0].send(Work {
-                            entry: WorkEntry::MultipleTxs(lane.1),
-                        }) {
+                        match execution_channels[lane.0].send(lane.1) {
                             Ok(_) => {}
                             Err(_) => {
                                 //for the moment we stop the entire execution if we see that one worker is not responding anymore
