@@ -83,6 +83,9 @@ pub struct RescheduleArgs {
     /// or to execute it directly via the SVM
     #[arg(long, default_value_t = true)]
     pub simulate: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub compute_bloom_fpr: bool,
 }
 
 #[tracing::instrument(name = "init", skip(args))]
@@ -97,6 +100,7 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         args.batch_size,
         args.slot_duration,
         args.num_workers,
+        args.compute_bloom_fpr
     )
     .await
     .context("Failed to load configuration")?;
@@ -130,16 +134,16 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     let mut summary = match config.scheduler_type {
         SchedulerType::Bloom => {
             let scheduler_harness = {
-                //128KB filter
-                let k = 2;
-                let w = 64;
-                let l = 16384;
+                let k = 4;
+                let w = 256;
+                let l = 4096;
                 let scheduler = BloomScheduler::new(
                     config.num_workers as usize,
                     k, //number of hashes
                     l, //filter length
                     w, //filter row width in bits
                     config.batch_size as usize,
+                    config.compute_bloom_fpr
                 );
                 SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
             };
@@ -282,8 +286,8 @@ fn load_runtime_transactions(
                         //get a random simuation time
                         let v = gaussian_distr.sample(rng); //from_zscore(uniform_distr.sample(rng));
                         //convert it to micro_secs
-                        //Some((v * 1000.0) as u64)
-                        Some(12000u64)
+                        Some((v * 1000.0) as u64)
+                        
                     };
                     //generate the compressed blockhash
                     let blockhash = {

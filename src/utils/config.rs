@@ -111,25 +111,28 @@ impl Snapshot {
     }
 }
 
-// Keep the runtime Config struct, but populate it from JsonConfig + overrides
+/// Keep the runtime Config struct, but populate it from JsonConfig + overrides
 #[derive(Debug, Clone)] // Add Clone
 pub struct Config {
-    // Snapshot configuration
+    /// Snapshot configuration
     pub start_snapshot: Snapshot,
     pub network_type: NetworkType,
-    // Genesis configuration
+    /// Genesis configuration
     pub genesis: GenesisConfig,
 
-    // Scheduler type
+    /// Scheduler type
     pub scheduler_type: SchedulerType,
 
-    // Execution configuration (can be overridden by CLI)
+    /// Execution configuration (can be overridden by CLI)
     pub num_txs_to_process: u64,
     pub batch_size: u64,
     pub slot_duration: u64,
     pub num_workers: u64,
     pub num_report_locks: usize,
     pub simulate: bool,
+    /// In the case of the bloom scheduler
+    /// specify if the False Positive rate should be calculated
+    pub compute_bloom_fpr: bool
 }
 
 impl Config {
@@ -144,6 +147,7 @@ impl Config {
         cli_batch_size: Option<u64>,
         cli_slot_duration: Option<u64>,
         cli_num_workers: Option<u64>,
+        cli_compute_bloom_fpr: bool
     ) -> anyhow::Result<Self> {
         let file = File::open(json_path)
             .map_err(|e| anyhow::anyhow!("Failed to open config file {:?}: {}", json_path, e))?;
@@ -184,6 +188,7 @@ impl Config {
         let batch_size = cli_batch_size.unwrap_or(network_config.batch_size);
         let slot_duration = cli_slot_duration.unwrap_or(network_config.slot_duration);
         let num_workers = cli_num_workers.unwrap_or(network_config.num_workers);
+        let compute_bloom_fpr = cli_compute_bloom_fpr;
         Ok(Self {
             start_snapshot,
             network_type,
@@ -196,6 +201,7 @@ impl Config {
             // TODO: Overrides
             num_report_locks: 10,
             simulate,
+            compute_bloom_fpr
         })
     }
 

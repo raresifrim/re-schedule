@@ -1,13 +1,13 @@
-use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
 use crate::harness::executor::tx_executor::FinishedWork;
+use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
 use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::{Receiver, Select, Sender};
 use itertools::Itertools;
 use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 use tracing::info;
 
@@ -59,13 +59,22 @@ where
         }
     }
 
-    pub fn run(mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> std::thread::JoinHandle<TxIssuerSummary> {
-        
+    /// if unlock_accounts==true then ThreadAwareAccountLocks is used to unlock the accounts locked by the scheduler
+    /// unlock_accounts set to false can be used for testing/collecting such as the bloom scheduler to compute the false positive rate
+    pub fn run(
+        mut self,
+        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
+        unlock_accounts: bool,
+    ) -> std::thread::JoinHandle<TxIssuerSummary> {
         //return handle
-        std::thread::spawn(move || self.issue_txs(account_locks))
+        std::thread::spawn(move || self.issue_txs(account_locks, unlock_accounts))
     }
 
-    fn issue_txs(&mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> TxIssuerSummary {
+    fn issue_txs(
+        &mut self,
+        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
+        unlock_accounts: bool,
+    ) -> TxIssuerSummary {
         //issuer will stop once it gets all transactions executed
         let mut num_txs = self.transactions.len();
 
@@ -84,41 +93,55 @@ where
                 Ok(operation) => {
                     let worker_index = operation.index();
                     tracing::debug!("Received work from worker {:?}", worker_index);
-                    
-                    //lock the mutex now and unlock accounts for all txs 
+
+                    //lock the mutex now and unlock accounts for all txs
                     let mut mutex = account_locks.lock().unwrap();
-                    
+
                     //try non-blocking receive to see if there were any blocked txs
                     //but only receive one at a time so that we issue it to the scheduler immediately
                     match operation.recv(&self.completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
-                                
                                 let completed_work = finished_work.completed_entry.unwrap();
                                 num_txs -= completed_work.len();
                                 self.summary.num_txs_executed += completed_work.len();
-                                
-                                for harness_tx in completed_work {
-                                    let account_keys = harness_tx.transaction.account_keys();
-                                    
-                                    let write_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                    harness_tx
-                                    .transaction
-                                    .is_writable(index)
-                                    .then_some(key)
-                                    }).collect_vec();
-                                    
-                                    let read_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                        (!harness_tx.transaction.is_writable(index)).then_some(key)
-                                    }).collect_vec();
-                                    
-                                    mutex.unlock_accounts(&write_account_locks, &read_account_locks, worker_index);
+
+                                if unlock_accounts {
+                                    for harness_tx in completed_work {
+                                        let account_keys = harness_tx.transaction.account_keys();
+
+                                        let write_account_locks = account_keys
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(index, key)| {
+                                                harness_tx
+                                                    .transaction
+                                                    .is_writable(index)
+                                                    .then_some(key)
+                                            })
+                                            .collect_vec();
+
+                                        let read_account_locks = account_keys
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(index, key)| {
+                                                (!harness_tx.transaction.is_writable(index))
+                                                    .then_some(key)
+                                            })
+                                            .collect_vec();
+
+                                        mutex.unlock_accounts(
+                                            &write_account_locks,
+                                            &read_account_locks,
+                                            worker_index,
+                                        );
+                                    }
                                 }
-                                
+
                                 tracing::debug!(
                                     "Successfully executed {}% of txs",
                                     (self.summary.num_initial_txs - num_txs) * 100
-                                    / self.summary.num_initial_txs
+                                        / self.summary.num_initial_txs
                                 );
                             }
 
@@ -130,20 +153,36 @@ where
                                 self.summary.num_txs_retried += failed_work.len();
                                 while let Some(mut harness_tx) = failed_work.pop() {
                                     harness_tx.retry = true;
-                                    let account_keys = harness_tx.transaction.account_keys();
-                                    
-                                    let write_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                    harness_tx
-                                    .transaction
-                                    .is_writable(index)
-                                    .then_some(key)
-                                    }).collect_vec();
-                                    
-                                    let read_account_locks = account_keys.iter().enumerate().filter_map(|(index, key)| {
-                                        (!harness_tx.transaction.is_writable(index)).then_some(key)
-                                    }).collect_vec();
-                                    
-                                    mutex.unlock_accounts(&write_account_locks, &read_account_locks, worker_index);
+
+                                    if unlock_accounts {
+                                        let account_keys = harness_tx.transaction.account_keys();
+
+                                        let write_account_locks = account_keys
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(index, key)| {
+                                                harness_tx
+                                                    .transaction
+                                                    .is_writable(index)
+                                                    .then_some(key)
+                                            })
+                                            .collect_vec();
+
+                                        let read_account_locks = account_keys
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(index, key)| {
+                                                (!harness_tx.transaction.is_writable(index))
+                                                    .then_some(key)
+                                            })
+                                            .collect_vec();
+
+                                        mutex.unlock_accounts(
+                                            &write_account_locks,
+                                            &read_account_locks,
+                                            worker_index,
+                                        );
+                                    }
 
                                     self.transactions.push_back(harness_tx);
                                 }
@@ -190,7 +229,7 @@ where
                                 info!("Scheduler channel is full, trying again later...");
                                 break;
                             }
-                            TrySendError::Disconnected(txs) => {
+                            TrySendError::Disconnected(_) => {
                                 info!("Scheduler channel got disconnected, ending issuer as well");
                                 break 'main;
                             }

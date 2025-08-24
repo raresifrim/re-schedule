@@ -93,7 +93,7 @@ where
         let mut harness_hdls = vec![];
         //the issuer will return the overall summary of the execution
         let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(self.config.num_workers as usize)));
-        let issuer_handle = self.tx_issuer.run(Arc::clone(&account_locks));
+        let issuer_handle = self.tx_issuer.run(Arc::clone(&account_locks), !self.config.compute_bloom_fpr);
         let scheduler_handle = self.tx_scheduler.run(Arc::clone(&account_locks));
 
         let account_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));

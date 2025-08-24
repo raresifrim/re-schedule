@@ -2,13 +2,12 @@ use {
     crate::harness::scheduler::scheduler::Work, ahash::AHashMap, solana_pubkey::Pubkey, std::{
         collections::hash_map::Entry,
         fmt::{Debug, Display},
-        ops::{BitAnd, BitAndAssign, Sub},
+        ops::{BitAnd, BitAndAssign, Sub, BitOrAssign, BitOr},
     }
 };
 use std::sync::Arc;
 use ahash::HashMap;
 use itertools::Itertools;
-use tracing::info;
 use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::Scheduler;
 use crate::harness::scheduler::scheduler::WorkerId;
@@ -29,8 +28,8 @@ pub struct AccountWriteLocks {
 }
 
 #[derive(Debug)]
-pub struct AccountReadLocks {
-    thread_set: ThreadSet,
+pub struct ThreadLocks {
+    pub thread_set: ThreadSet,
     lock_counts: [u32; MAX_THREADS],
 }
 
@@ -45,8 +44,8 @@ pub struct AccountReadLocks {
 /// Contains thread-set for easily checking which threads are scheduled.
 #[derive(Default, Debug)]
 pub struct AccountLocks {
-    pub write_locks: Option<AccountWriteLocks>,
-    pub read_locks: Option<AccountReadLocks>,
+    pub write_locks: Option<ThreadLocks>,
+    pub read_locks: Option<ThreadLocks>,
 }
 
 /// `try_lock_accounts` may fail for different reasons:
@@ -200,6 +199,38 @@ impl ThreadAwareAccountLocks {
         Some(schedulable_threads)
     }
 
+
+     /// Returns `ThreadSet` that the given accounts are locked by.
+    pub fn account_conflicting_threads<'a>(
+        &self,
+        write_account_locks: &[&Pubkey],
+        read_account_locks: &[&Pubkey],
+    ) -> ThreadSet {
+        let mut schedulable_threads = ThreadSet::none();
+       
+        for pair in write_account_locks.iter().zip_longest(read_account_locks.iter()) {
+            match pair {
+                itertools::EitherOrBoth::Both(w, r) => {
+                    let waw_hazard = self.write_locked_threads(w);
+                    let war_hazard = self.read_locked_threads(w);
+                    let raw_hazard = self.write_locked_threads(r);
+                    schedulable_threads |= waw_hazard | war_hazard | raw_hazard;
+                }
+                itertools::EitherOrBoth::Left(w) => {
+                    let waw_hazard = self.write_locked_threads(w);
+                    let war_hazard = self.read_locked_threads(w);
+                    schedulable_threads |= waw_hazard | war_hazard;
+                }
+                itertools::EitherOrBoth::Right(r) => {
+                    let raw_hazard = self.read_locked_threads(r);
+                    schedulable_threads |= raw_hazard;
+                }
+            }
+        }
+
+        schedulable_threads
+    }
+
     /// Returns `ThreadSet` of schedulable threads for the given readable account.
     fn read_schedulable_threads(&self, account: &Pubkey) -> ThreadSet {
         self.schedulable_threads::<false>(account)
@@ -208,6 +239,36 @@ impl ThreadAwareAccountLocks {
     /// Returns `ThreadSet` of schedulable threads for the given writable account.
     fn write_schedulable_threads(&self, account: &Pubkey) -> ThreadSet {
         self.schedulable_threads::<true>(account)
+    }
+
+    /// Returns `ThreadSet` of threads that hold locks on the readable account.
+    fn read_locked_threads(&self, account: &Pubkey) -> ThreadSet {
+        match self.locks.get(account) {
+            None => ThreadSet::none(),
+            Some(AccountLocks {
+                write_locks: _,
+                read_locks: Some(read_locks),
+            }) => read_locks.thread_set,
+            Some(AccountLocks {
+                write_locks: _,
+                read_locks: None,
+            }) => ThreadSet::none(),
+        }
+    }
+
+    /// Returns `ThreadSet` of threads that hold locks on the writable account.
+    fn write_locked_threads(&self, account: &Pubkey) -> ThreadSet {
+         match self.locks.get(account) {
+            None => ThreadSet::none(),
+            Some(AccountLocks {
+                write_locks: Some(write_locks),
+                read_locks: _,
+            }) => write_locks.thread_set,
+            Some(AccountLocks {
+                write_locks: None,
+                read_locks: _,
+            }) => ThreadSet::none(),
+        }
     }
 
     /// Returns `ThreadSet` of schedulable threads.
@@ -237,14 +298,14 @@ impl ThreadAwareAccountLocks {
             Some(AccountLocks {
                 write_locks: Some(write_locks),
                 read_locks: None,
-            }) => ThreadSet::only(write_locks.thread_id),
+            }) =>  write_locks.thread_set.only_one_contained().map(ThreadSet::only).unwrap_or_else(ThreadSet::none),
             Some(AccountLocks {
                 write_locks: Some(write_locks),
                 read_locks: Some(read_locks),
             }) => {
                 assert_eq!(
                     read_locks.thread_set.only_one_contained(),
-                    Some(write_locks.thread_id)
+                    write_locks.thread_set.only_one_contained()
                 );
                 read_locks.thread_set
             }
@@ -282,28 +343,22 @@ impl ThreadAwareAccountLocks {
 
         let AccountLocks {
             write_locks,
-            read_locks,
+            read_locks: _,
         } = entry;
 
-        if let Some(read_locks) = read_locks {
-            assert_eq!(
-                read_locks.thread_set.only_one_contained(),
-                Some(thread_id),
-                "outstanding read lock must be on same thread"
-            );
-        }
-
-        if let Some(write_locks) = write_locks {
-            assert_eq!(
-                write_locks.thread_id, thread_id,
-                "outstanding write lock must be on same thread"
-            );
-            write_locks.lock_count += 1;
-        } else {
-            *write_locks = Some(AccountWriteLocks {
-                thread_id,
-                lock_count: 1,
-            });
+        match write_locks {
+            Some(write_locks) => {
+                write_locks.thread_set.insert(thread_id);
+                write_locks.lock_counts[thread_id] += 1;
+            }
+            None => {
+                let mut lock_counts = [0; MAX_THREADS];
+                lock_counts[thread_id] = 1;
+                *write_locks = Some(ThreadLocks {
+                    thread_set: ThreadSet::only(thread_id),
+                    lock_counts,
+                });
+            }
         }
     }
 
@@ -323,16 +378,19 @@ impl ThreadAwareAccountLocks {
             panic!("write lock must exist for account: {account}");
         };
 
-        assert_eq!(
-            write_locks.thread_id, thread_id,
+        assert!(
+            write_locks.thread_set.contains(thread_id),
             "outstanding write lock must be on same thread"
         );
 
-        write_locks.lock_count -= 1;
-        if write_locks.lock_count == 0 {
-            *maybe_write_locks = None;
-            if read_locks.is_none() {
-                entry.remove();
+        write_locks.lock_counts[thread_id] -= 1;
+        if write_locks.lock_counts[thread_id] == 0 {
+            write_locks.thread_set.remove(thread_id);
+            if write_locks.thread_set.is_empty() {
+                *maybe_write_locks = None;
+                if read_locks.is_none() {
+                    entry.remove();
+                }
             }
         }
     }
@@ -341,16 +399,9 @@ impl ThreadAwareAccountLocks {
     /// Panics if the account is already locked for writing on another thread.
     fn read_lock_account(&mut self, account: &Pubkey, thread_id: ThreadId) {
         let AccountLocks {
-            write_locks,
+            write_locks: _,
             read_locks,
         } = self.locks.entry(*account).or_default();
-
-        if let Some(write_locks) = write_locks {
-            assert_eq!(
-                write_locks.thread_id, thread_id,
-                "outstanding write lock must be on same thread"
-            );
-        }
 
         match read_locks {
             Some(read_locks) => {
@@ -360,7 +411,7 @@ impl ThreadAwareAccountLocks {
             None => {
                 let mut lock_counts = [0; MAX_THREADS];
                 lock_counts[thread_id] = 1;
-                *read_locks = Some(AccountReadLocks {
+                *read_locks = Some(ThreadLocks {
                     thread_set: ThreadSet::only(thread_id),
                     lock_counts,
                 });
@@ -410,11 +461,26 @@ impl BitAnd for ThreadSet {
     }
 }
 
+impl BitOr for ThreadSet {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
 impl BitAndAssign for ThreadSet {
     fn bitand_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0;
     }
 }
+
+impl BitOrAssign for ThreadSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 
 impl Sub for ThreadSet {
     type Output = Self;
