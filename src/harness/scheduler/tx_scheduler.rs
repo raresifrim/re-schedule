@@ -7,10 +7,11 @@ use tracing::info;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// TxScheduler should be aware of both Issuer and Scheduler traits
 #[derive(Debug)]
 pub struct TxScheduler<S>
 where
-    S: Scheduler + Send + Sync + 'static,
+    S: Scheduler + Send + Sync + 'static
 {
     /// scheduler strategy used for the tx scheduler
     pub scheduler: S,
@@ -22,15 +23,15 @@ where
 
 impl<S> TxScheduler<S>
 where
-    S: Scheduler + Send + Sync + 'static,
+    S: Scheduler + Send + Sync + 'static
 {
-    pub fn run(mut self, account_locks: Arc<Mutex<ThreadAwareAccountLocks>>) -> std::thread::JoinHandle<SchedulingSummary> {
+    pub fn run(mut self) -> std::thread::JoinHandle<SchedulingSummary> {
         std::thread::spawn(move || {
             // the schedulers' schedule function should implement the loop
             // that receives txs until the channel becomes empty or disconnected
             let schedule_resp = self
                 .scheduler
-                .schedule(&self.work_issuer, &self.work_executors, account_locks);
+                .schedule(&self.work_issuer, &self.work_executors);
             if schedule_resp.is_err() {
                 //scheduler should return errors such as channels disconnected
                 //in which case we should end its execution

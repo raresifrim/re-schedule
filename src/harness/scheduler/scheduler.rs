@@ -74,8 +74,7 @@ pub trait Scheduler {
     fn schedule(
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
-        execution_channels: &[Sender<Work<Self::Tx>>],
-        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
+        execution_channels: &[Sender<Work<Self::Tx>>]
     ) -> Result<(), SchedulerError>;
 
     /// retrieve scheduling summary

@@ -1,3 +1,5 @@
+use crate::harness::issuer::basic_issuer::BasicIssuer;
+use crate::harness::issuer::thread_aware_issuer::ThreadAwareIssuer;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
@@ -9,6 +11,7 @@ use crate::utils::config::Config;
 use crate::utils::config::NetworkType;
 use crate::utils::config::SchedulerType;
 use crate::utils::snapshot::load_bank_from_snapshot;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use ahash::AHasher;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -48,6 +51,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
+use std::sync::Mutex;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -133,43 +137,52 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
     // TODO: Refactor
     let mut summary = match config.scheduler_type {
         SchedulerType::Bloom => {
-            let scheduler_harness = {
+            {
                 let k = 4;
                 let w = 256;
                 let l = 4096;
+                let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(config.num_workers as usize)));
                 let scheduler = BloomScheduler::new(
                     config.num_workers as usize,
                     k, //number of hashes
                     l, //filter length
                     w, //filter row width in bits
                     config.batch_size as usize,
-                    config.compute_bloom_fpr
+                    config.compute_bloom_fpr,
+                    Some(account_locks.clone())
                 );
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
-            };
-            info!("Initialized Bloom harness");
-            scheduler_harness.run()
+                // TODO: Refactor
+                if config.compute_bloom_fpr {
+                    let issuer = ThreadAwareIssuer::new(account_locks.clone(), !config.compute_bloom_fpr);
+                    let scheduler_harness = SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?;
+                    info!("Initialized Bloom harness");
+                    scheduler_harness.run()
+                } else {
+                    let issuer = BasicIssuer::new();
+                    let scheduler_harness = SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?;
+                    info!("Initialized Bloom harness");
+                    scheduler_harness.run()
+                }
+            }
         }
         SchedulerType::Greedy => {
             let scheduler_harness = {
+                let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(config.num_workers as usize)));
                 let scheduler = GreedyScheduler::new(
                     start_bank.clone(),
+                    account_locks.clone(),
                     config.num_workers as usize,
                     config.batch_size as usize,
                     MAX_COMPUTE_UNIT_LIMIT as u64,
                 );
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+                let issuer = ThreadAwareIssuer::new(account_locks.clone(), true);
+                SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?
             };
             info!("Initialized Greedy harness");
             scheduler_harness.run()
         }
         SchedulerType::PrioGraph => {
-            let scheduler_harness = {
-                let scheduler = SequentialScheduler::new();
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
-            };
-            info!("Initialized PrioGraph harness");
-            scheduler_harness.run()
+            unimplemented!()
         }
         SchedulerType::Sequential => {
             let scheduler_harness = {
@@ -181,7 +194,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                     );
                     config.num_workers = 1;
                 };
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+                let issuer = BasicIssuer::new();
+                SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?
             };
             info!("Initialized Sequential harness");
             scheduler_harness.run()
@@ -194,7 +208,8 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                     config.batch_size as usize,
                     start_bank.clone(),
                 );
-                SchedulerHarness::new_from_config(config, scheduler, transactions, start_bank)?
+                let issuer = BasicIssuer::new();
+                SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?
             };
             info!("Initialized RoundRobin harness");
             scheduler_harness.run()
@@ -214,12 +229,15 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
 
 fn recompute_execution_summaries(summary: &mut RunSummary) {
     let mut ex = summary.executors.clone();
-    let max_exec_time = ex.iter().max_by(|a, b| Ord::cmp(&a.execution_time_us, &b.execution_time_us)).unwrap().execution_time_us;
+    let slowest_worker = ex.iter().max_by(|a, b| Ord::cmp(&a.execution_time_us, &b.execution_time_us)).unwrap();
+    let max_exec_time_us = slowest_worker.execution_time_us;
+    let max_exec_time_secs = slowest_worker.total_time_secs;
     let ex = ex.iter_mut().map(|summary |{
-        summary.idle_time_us += max_exec_time - summary.execution_time_us;
-        summary.execution_time_us = max_exec_time;
-        summary.real_saturation = summary.work_time_us as f64 / max_exec_time as f64 * 100.0;
-        summary.raw_saturation = (summary.work_time_us + summary.retry_time_us) as f64 / max_exec_time as f64 * 100.0;
+        summary.idle_time_us += max_exec_time_us - summary.execution_time_us;
+        summary.execution_time_us = max_exec_time_us;
+        summary.real_saturation = summary.work_time_us as f64 / max_exec_time_us as f64 * 100.0;
+        summary.raw_saturation = (summary.work_time_us + summary.retry_time_us) as f64 / max_exec_time_us as f64 * 100.0;
+        summary.total_time_secs = max_exec_time_secs;
         summary
     }).collect_vec();
      println!(

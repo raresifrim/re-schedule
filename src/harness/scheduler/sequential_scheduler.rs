@@ -20,14 +20,13 @@ impl Scheduler for SequentialScheduler {
     type Tx = RuntimeTransaction<SanitizedTransaction>;
     fn add_thread_trackers(&mut self, _execution_trackers: Vec<std::sync::Arc<ExecutionTracker>>) {
         //not needed in a sequntial scheduler
-        unimplemented!()
+        return;
     }
 
     fn schedule(
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-        _account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         //this implements a dummy sequential scheduler for a single worker
         let worker_id = 0;

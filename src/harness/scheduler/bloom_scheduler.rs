@@ -14,6 +14,7 @@ use bloom_1x::bloom::QueryResult;
 use crossbeam_channel::{Receiver, Sender};
 use itertools::{EitherOrBoth::*, Itertools};
 use rapidhash::quality::RapidBuildHasher;
+use solana_accounts_db::account_locks;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
@@ -42,6 +43,8 @@ pub struct BloomScheduler {
     w_query_results: Vec<QueryResult>,
     thread_trackers: Vec<Arc<ExecutionTracker>>,
     scheduling_summary: SchedulingSummary,
+    /// should be used when computing the False Positive Rate
+    account_locks: Option<Arc<Mutex<ThreadAwareAccountLocks>>>,
     /// if enabled, use the ThreadAwareAccountLocks to check if the filter correctly matched accounts
     compute_false_positive_rate: bool,
     /// computes the false positive rate of the bloom filter
@@ -73,6 +76,7 @@ impl BloomScheduler {
         w: usize,
         batch_size: usize,
         compute_false_positive_rate: bool,
+        account_locks: Option<Arc<Mutex<ThreadAwareAccountLocks>>>
     ) -> Self {
         let mut conflict_families = vec![];
 
@@ -104,9 +108,20 @@ impl BloomScheduler {
             total_txs: 0,
         };
 
+        /* 
+        let new_account_locks;
+        if compute_false_positive_rate {
+            new_account_locks = account_locks.unwrap();
+        } else {
+            // just create an empty struct if we don't want to compute fpr
+            new_account_locks = Arc::new(Mutex::new(ThreadAwareAccountLocks::new(num_workers)));
+        }
+        */
+
         Self {
             num_workers,
             conflict_families,
+            account_locks,
             batch_size,
             container,
             work_lanes,
@@ -133,7 +148,6 @@ impl BloomScheduler {
         &mut self,
         hasher: rapidhash::inner::RapidBuildHasher<true, true>,
         schedulable_threads: ThreadSet,
-        account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>,
     ) {
         //save worker that should receive the scheduled work
         let mut next_worker: usize = self.num_workers;
@@ -217,7 +231,7 @@ impl BloomScheduler {
             }
 
             if self.compute_false_positive_rate {
-                self.compute_bloom_fpr(&harness_tx, account_locks, hasher, next_worker);
+                self.compute_bloom_fpr(&harness_tx, hasher, next_worker);
             }
 
             for pair in self
@@ -288,14 +302,14 @@ impl BloomScheduler {
     fn compute_bloom_fpr(
         &mut self,
         harness_tx: &HarnessTransaction<<BloomScheduler as Scheduler>::Tx>,
-        account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>,
         hasher: rapidhash::inner::RapidBuildHasher<true, true>,
         next_worker: usize,
     ) {
         use crate::harness::scheduler::thread_aware_account_locks::AccountLocks;
 
         let tx_accounts = harness_tx.transaction.get_account_locks_unchecked();
-        let mut mutex = account_locks.lock().unwrap();
+        let binding = self.account_locks.clone().unwrap();
+        let mut mutex = binding.lock().unwrap();
         
         for write_account in tx_accounts.writable.iter() {
             let index = hasher.hash_one(write_account);
@@ -395,13 +409,16 @@ impl Scheduler for BloomScheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
     ) -> Result<(), SchedulerError> {
+
+        assert!((self.compute_false_positive_rate && self.account_locks.is_some()) || !self.compute_false_positive_rate);
+
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
         let mut current_buffer_len = 0;
         let hasher  = RapidBuildHasher::new(420);
         let schedulable_threads = ThreadSet::any(self.num_workers);
+        
         loop {
             //STAGE 1: Ingest txs from the TxIssuer
             //quickly check if there are new incoming txs
@@ -465,7 +482,7 @@ impl Scheduler for BloomScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            self.schedule_burst(hasher, schedulable_threads, &account_locks);
+            self.schedule_burst(hasher, schedulable_threads);
             num_retries = NUM_INGEST_RETRIES;
 
             //STAGE 3: send the current scheduled txs to the workers

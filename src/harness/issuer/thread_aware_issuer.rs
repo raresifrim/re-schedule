@@ -1,89 +1,54 @@
-use crate::harness::executor::tx_executor::FinishedWork;
-use crate::harness::scheduler::scheduler::{HarnessTransaction, Work};
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
-use crossbeam_channel::TrySendError;
-use crossbeam_channel::{Receiver, Select, Sender};
-use itertools::Itertools;
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use crate::harness::issuer::tx_issuer::TxIssuerSummary;
+use crate::harness::issuer::issuer::Issuer;
+use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
+use std::collections::VecDeque;
+use crate::harness::scheduler::scheduler::HarnessTransaction;
 use std::time::Instant;
+use crossbeam_channel::Select;
+use itertools::Itertools;
+use crate::harness::scheduler::scheduler::Work;
+use crossbeam_channel::TrySendError;
 use tracing::info;
+use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
 
-pub struct TxIssuer<Tx>
-where
-    Tx: TransactionWithMeta + Send + Sync + 'static,
-{
-    transactions: VecDeque<HarnessTransaction<Tx>>,
-    completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
-    work_sender: Sender<Work<Tx>>,
+pub struct ThreadAwareIssuer {
+    account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
+    unlock_accounts: bool,
     summary: TxIssuerSummary,
 }
 
-#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
-pub struct TxIssuerSummary {
-    /// number of txs received at the beginning of the reschedule operation
-    num_initial_txs: usize,
-    /// total number of txs that were completely executed, either directly or via retry
-    num_txs_executed: usize,
-    /// number of txs that were retried because of error
-    num_txs_retried: usize,
-    /// total execution time measured from the tx issuer perspective
-    total_exec_time: f64,
-    /// throughput as unique txs executed over execution time as txs/s
-    useful_tx_throughput: f64,
-    /// throughput as total amount txs executed over execution time as txs/s
-    raw_tx_throughput: f64,
-}
-
-impl<Tx> TxIssuer<Tx>
-where
-    Tx: TransactionWithMeta + Send + Sync + 'static,
-{
-    pub fn new(
-        completed_work_receiver: Vec<Receiver<FinishedWork<Tx>>>,
-        work_sender: Sender<Work<Tx>>,
-        transactions: VecDeque<HarnessTransaction<Tx>>,
-    ) -> Self {
-        let num_initial_txs = transactions.len();
-
-        Self {
-            transactions,
-            completed_work_receiver,
-            work_sender,
+impl ThreadAwareIssuer {
+    pub fn new(account_locks: Arc<Mutex<ThreadAwareAccountLocks>>, unlock_accounts: bool,) -> Self {
+        Self{
+            account_locks,
+            unlock_accounts,
             summary: TxIssuerSummary {
-                num_initial_txs,
                 ..Default::default()
             },
         }
     }
+}
 
-    /// if unlock_accounts==true then ThreadAwareAccountLocks is used to unlock the accounts locked by the scheduler
-    /// unlock_accounts set to false can be used for testing/collecting such as the bloom scheduler to compute the false positive rate
-    pub fn run(
-        mut self,
-        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
-        unlock_accounts: bool,
-    ) -> std::thread::JoinHandle<TxIssuerSummary> {
-        //return handle
-        std::thread::spawn(move || self.issue_txs(account_locks, unlock_accounts))
-    }
-
+impl<Tx> Issuer<Tx> for ThreadAwareIssuer 
+where Tx: TransactionWithMeta + Send + Sync + 'static
+{
     fn issue_txs(
-        &mut self,
-        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
-        unlock_accounts: bool,
-    ) -> TxIssuerSummary {
+            &mut self,
+            mut transactions: VecDeque<HarnessTransaction<Tx>>,
+            work_sender: crossbeam_channel::Sender<crate::harness::scheduler::scheduler::Work<Tx>>,
+            completed_work_receiver: Vec<crossbeam_channel::Receiver<crate::harness::executor::tx_executor::FinishedWork<Tx>>>,
+        ) -> super::tx_issuer::TxIssuerSummary {
         //issuer will stop once it gets all transactions executed
-        let mut num_txs = self.transactions.len();
-
+        let mut num_txs = transactions.len();
+        self.summary.num_initial_txs = num_txs;
         let start_time = Instant::now();
 
         'main: loop {
             //multiplex between channels and check first that sends something
             let mut recv_selector = Select::new();
-            for r in self.completed_work_receiver.as_slice() {
+            for r in completed_work_receiver.as_slice() {
                 recv_selector.recv(r);
             }
 
@@ -95,18 +60,18 @@ where
                     tracing::debug!("Received work from worker {:?}", worker_index);
 
                     //lock the mutex now and unlock accounts for all txs
-                    let mut mutex = account_locks.lock().unwrap();
+                    let mut mutex = self.account_locks.lock().unwrap();
 
                     //try non-blocking receive to see if there were any blocked txs
                     //but only receive one at a time so that we issue it to the scheduler immediately
-                    match operation.recv(&self.completed_work_receiver[worker_index]) {
+                    match operation.recv(&completed_work_receiver[worker_index]) {
                         Ok(finished_work) => {
                             if finished_work.completed_entry.is_some() {
                                 let completed_work = finished_work.completed_entry.unwrap();
                                 num_txs -= completed_work.len();
                                 self.summary.num_txs_executed += completed_work.len();
 
-                                if unlock_accounts {
+                                if self.unlock_accounts {
                                     for harness_tx in completed_work {
                                         let account_keys = harness_tx.transaction.account_keys();
 
@@ -154,7 +119,7 @@ where
                                 while let Some(mut harness_tx) = failed_work.pop() {
                                     harness_tx.retry = true;
 
-                                    if unlock_accounts {
+                                    if self.unlock_accounts {
                                         let account_keys = harness_tx.transaction.account_keys();
 
                                         let write_account_locks = account_keys
@@ -184,7 +149,7 @@ where
                                         );
                                     }
 
-                                    self.transactions.push_back(harness_tx);
+                                    transactions.push_back(harness_tx);
                                 }
                             }
                         }
@@ -198,23 +163,23 @@ where
                 break;
             }
 
-            if self.transactions.is_empty() {
+            if transactions.is_empty() {
                 //no more txs to issue, so just wait for workers to send results back
                 continue;
             }
 
             //send available txs
             //channel must bounded, so that once filled, the Tx issuer is free to do other work
-            while !self.work_sender.is_full() {
+            while !work_sender.is_full() {
                 //get front tx but do not consume it as we might not be able to send it
-                let maybe_tx = self.transactions.pop_front();
+                let maybe_tx = transactions.pop_front();
                 if maybe_tx.is_none() {
                     //nothing to send
                     //maybe we will receive something from the workers
                     break;
                 }
                 let tx = maybe_tx.unwrap();
-                match self.work_sender.try_send(Work {
+                match work_sender.try_send(Work {
                     total_cus: tx.cu_cost,
                     entry: vec![tx],
                 }) {
@@ -224,7 +189,7 @@ where
                             //when full, we should push back our txs
                             TrySendError::Full(mut txs) => {
                                 while let Some(element) = txs.entry.pop() {
-                                    self.transactions.push_front(element);
+                                    transactions.push_front(element);
                                 }
                                 info!("Scheduler channel is full, trying again later...");
                                 break;

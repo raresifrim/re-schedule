@@ -35,11 +35,13 @@ pub struct GreedyScheduler {
     container: VecDeque<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>,
     work_lanes: HashMap<WorkerId, Work<<GreedyScheduler as Scheduler>::Tx>>,
     thread_trackers: Vec<Arc<ExecutionTracker>>,
+    account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
 }
 
 impl GreedyScheduler {
     pub fn new(
         bank: Arc<Bank>,
+        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
         num_workers: usize,
         batch_size: usize,
         target_scheduled_cus: u64,
@@ -67,6 +69,7 @@ impl GreedyScheduler {
 
         Self {
             bank,
+            account_locks,
             num_workers,
             batch_size,
             target_scheduled_cus,
@@ -80,7 +83,7 @@ impl GreedyScheduler {
         }
     }
 
-    fn get_next_txs(&mut self, account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>) {
+    fn get_next_txs(&mut self) {
         let num_threads = self.num_workers;
         let target_cu_per_thread = self.target_scheduled_cus / num_threads as u64;
         let mut schedulable_threads = ThreadSet::any(num_threads);
@@ -111,7 +114,7 @@ impl GreedyScheduler {
             }
 
             // Now check if the transaction can actually be scheduled.
-            match self.try_schedule_transaction(&harness_tx, schedulable_threads, account_locks) {
+            match self.try_schedule_transaction(&harness_tx, schedulable_threads) {
                 Err(TransactionSchedulingError::UnschedulableConflicts) => {
                     self.unschedulables.push_back(harness_tx);
                 }
@@ -185,7 +188,6 @@ impl GreedyScheduler {
         &mut self,
         harness_tx: &HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>,
         schedulable_threads: ThreadSet,
-        account_locks: &Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<ThreadId, TransactionSchedulingError> {
         
         let account_keys = harness_tx.transaction.account_keys();
@@ -199,7 +201,7 @@ impl GreedyScheduler {
             (!harness_tx.transaction.is_writable(index)).then_some(key)
         }).collect_vec();
 
-        let mut mutex = account_locks.lock().unwrap();
+        let mut mutex = self.account_locks.lock().unwrap();
         let thread_id = match mutex.try_lock_accounts(
             &write_account_locks,
             &read_account_locks,
@@ -241,7 +243,6 @@ impl Scheduler for GreedyScheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-        account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         //set a number of retries to accumulate txs
         let mut num_retries = NUM_INGEST_RETRIES;
@@ -291,7 +292,7 @@ impl Scheduler for GreedyScheduler {
                 }
             }
             //once we got here, we know we can start scheduling the txs
-            self.get_next_txs(&account_locks);
+            self.get_next_txs();
             num_retries = NUM_INGEST_RETRIES;
             current_buffer_len = 0;
 

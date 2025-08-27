@@ -65,7 +65,6 @@ impl Scheduler for RoundRobinScheduler {
         &mut self,
         issue_channel: &Receiver<Work<Self::Tx>>,
         execution_channels: &[Sender<Work<Self::Tx>>],
-        _account_locks: Arc<Mutex<ThreadAwareAccountLocks>>
     ) -> Result<(), SchedulerError> {
         
         let schedulable_threads = ThreadSet::any(self.num_workers);

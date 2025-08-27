@@ -1,9 +1,10 @@
+use crate::harness::issuer::issuer::Issuer;
 use crate::harness::scheduler::scheduler::{HarnessTransaction, Scheduler};
 use crate::harness::scheduler::tx_scheduler::TxScheduler;
 use crate::harness::executor::tx_executor::TxExecutorSummary;
 use crate::harness::executor::tx_executor::TxExecutor;
 use crate::harness::executor::shared_account_locks::{SharedAccountLocks,LockSummary};
-use crate::harness::tx_issuer::TxIssuer;
+use crate::harness::issuer::tx_issuer::TxIssuer;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::utils::config::Config;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -12,25 +13,28 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use super::scheduler::scheduler::SchedulingSummary;
-use super::tx_issuer::TxIssuerSummary;
+use super::issuer::tx_issuer::TxIssuerSummary;
 
-pub struct SchedulerHarness<S>
+pub struct SchedulerHarness<S, I>
 where
     S: Scheduler + Send + Sync + 'static,
+    I: Issuer<S::Tx> + Send + Sync + 'static
 {
     config: Config,
-    tx_issuer: TxIssuer<S::Tx>,
+    tx_issuer: TxIssuer<I, S::Tx>,
     tx_scheduler: TxScheduler<S>,
     tx_executors: Vec<TxExecutor<S::Tx>>,
 }
 
-impl<S> SchedulerHarness<S>
+impl<S,I> SchedulerHarness<S, I>
 where
     S: Scheduler + Send + Sync + 'static,
+    I: Issuer<S::Tx> + Send + Sync + 'static
 {
     pub fn new_from_config(
         config: Config,
         scheduler: S,
+        issuer: I,
         transactions: VecDeque<HarnessTransaction<S::Tx>>,
         bank: Arc<Bank>,
     ) -> anyhow::Result<Self> {
@@ -49,6 +53,7 @@ where
         ) = (0..config.num_workers).map(|_| unbounded()).unzip();
 
         let tx_issuer = TxIssuer::new(
+            issuer,
             issuer_to_execute_receive_channels,
             issuer_send_channel,
             transactions,
@@ -92,9 +97,9 @@ where
 
         let mut harness_hdls = vec![];
         //the issuer will return the overall summary of the execution
-        let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(self.config.num_workers as usize)));
-        let issuer_handle = self.tx_issuer.run(Arc::clone(&account_locks), !self.config.compute_bloom_fpr);
-        let scheduler_handle = self.tx_scheduler.run(Arc::clone(&account_locks));
+        
+        let issuer_handle = self.tx_issuer.run();
+        let scheduler_handle = self.tx_scheduler.run();
 
         let account_locks = Arc::new(Mutex::new(SharedAccountLocks::new()));
         for ex in self.tx_executors {
