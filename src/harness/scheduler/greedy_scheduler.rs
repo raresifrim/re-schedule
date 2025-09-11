@@ -16,7 +16,6 @@ use itertools::Itertools;
 use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
-use tracing::info;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;

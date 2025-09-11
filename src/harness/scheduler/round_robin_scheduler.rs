@@ -6,15 +6,12 @@ use crate::harness::scheduler::scheduler::Work;
 use crate::harness::scheduler::scheduler::WorkerId;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadSet;
 use crate::harness::scheduler::thread_aware_account_locks::select_thread;
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use ahash::{HashMap, HashMapExt};
 use crossbeam_channel::{Receiver, Sender};
 use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::sync::Arc;
-use std::sync::Mutex;
-use tracing::info;
 
 
 pub struct RoundRobinScheduler {

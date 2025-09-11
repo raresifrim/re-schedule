@@ -1,7 +1,3 @@
-#![allow(
-    mismatched_lifetime_syntaxes,
-    reason = "The lifetime is only named because inference is weak"
-)]
 use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::scheduler::Work;

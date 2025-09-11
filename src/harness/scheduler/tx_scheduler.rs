@@ -1,11 +1,9 @@
 use crate::harness::scheduler::scheduler::{
     Scheduler, SchedulingSummary, Work,
 };
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
-use std::sync::Arc;
-use std::sync::Mutex;
+
 
 /// TxScheduler should be aware of both Issuer and Scheduler traits
 #[derive(Debug)]

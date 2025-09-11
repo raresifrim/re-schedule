@@ -1,5 +1,7 @@
 use crate::harness::issuer::basic_issuer::BasicIssuer;
+use crate::harness::issuer::bloom_counter_issuer::BloomCounterIssuer;
 use crate::harness::issuer::thread_aware_issuer::ThreadAwareIssuer;
+use crate::harness::scheduler::bloom_counter_scheduler::BloomCounterScheduler;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
@@ -12,6 +14,8 @@ use crate::utils::config::NetworkType;
 use crate::utils::config::SchedulerType;
 use crate::utils::snapshot::load_bank_from_snapshot;
 use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
+use crate::harness::scheduler::bloom_counter_scheduler::ConflictFamily;
+use bloom_1x::bloom_counter::Bloom1Counter;
 use ahash::AHasher;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -50,8 +54,10 @@ use std::hash::Hasher;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tracing::info;
 use std::sync::Mutex;
+use rapidhash::quality::RapidBuildHasher;
 
 #[derive(Parser, Debug)]
 pub struct RescheduleArgs {
@@ -151,7 +157,6 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                     config.compute_bloom_fpr,
                     Some(account_locks.clone())
                 );
-                // TODO: Refactor
                 if config.compute_bloom_fpr {
                     let issuer = ThreadAwareIssuer::new(account_locks.clone(), !config.compute_bloom_fpr);
                     let scheduler_harness = SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?;
@@ -163,6 +168,34 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                     info!("Initialized Bloom harness");
                     scheduler_harness.run()
                 }
+            }
+        }
+        SchedulerType::BloomCounter => {
+             {
+                let k = 4;
+                let w = 256;
+                let l = 4096;
+                let mut conflict_families = vec![];
+                for _ in 0..config.num_workers {
+                    let conflict_family = ConflictFamily {
+                        read_filter: Bloom1Counter::new(k, l, w, 96),
+                        write_filter: Bloom1Counter::new(k, l, w, 96),
+                    };
+                    conflict_families.push(RwLock::new(conflict_family));
+                }
+                let conflict_families: Arc<Vec<RwLock<ConflictFamily>>> = Arc::new(conflict_families);
+                let hasher: rapidhash::inner::RapidBuildHasher<true, true>  = RapidBuildHasher::new(420);
+                let scheduler = BloomCounterScheduler::new(
+                    config.num_workers as usize,
+                    config.batch_size as usize,
+                    conflict_families.clone(),
+                    hasher
+                );
+                
+                let issuer = BloomCounterIssuer::new(conflict_families.clone(),hasher);
+                let scheduler_harness = SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?;
+                info!("Initialized BloomCounter harness");
+                scheduler_harness.run()
             }
         }
         SchedulerType::Greedy => {

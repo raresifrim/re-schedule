@@ -5,7 +5,6 @@ use crate::harness::executor::tx_executor::TxExecutorSummary;
 use crate::harness::executor::tx_executor::TxExecutor;
 use crate::harness::executor::shared_account_locks::{SharedAccountLocks,LockSummary};
 use crate::harness::issuer::tx_issuer::TxIssuer;
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
 use crate::utils::config::Config;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use solana_runtime::bank::Bank;

@@ -14,17 +14,15 @@ use bloom_1x::bloom::QueryResult;
 use crossbeam_channel::{Receiver, Sender};
 use itertools::{EitherOrBoth::*, Itertools};
 use rapidhash::quality::RapidBuildHasher;
-use solana_accounts_db::account_locks;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tracing::info;
 
 //number of tries to fill in the buffer to max capacity
-const NUM_INGEST_RETRIES: usize = 5;
+const NUM_INGEST_RETRIES: usize = 3;
 //maximum number of accounts that a tx can use
 const MAX_NUM_TX_ACCOUNTS: usize = 64;
 
@@ -60,9 +58,7 @@ struct ConflictFamily {
     write_filter: Bloom1X,
 }
 
-// TODO: Unit benchmarks for false positive fail rate
-// TODO: Identify size of batch
-// TODO: Size of burst
+
 impl BloomScheduler {
     /// create a Bloom-based Scheduler where one single hash (XooDoo-NC) function is used with state size equal to 96 bits
     /// k -> number of hashes to extract from main hash digest
@@ -150,7 +146,7 @@ impl BloomScheduler {
         schedulable_threads: ThreadSet,
     ) {
         //save worker that should receive the scheduled work
-        let mut next_worker: usize = self.num_workers;
+        let mut next_worker: usize;
 
         while let Some(harness_tx) = self.container.pop_front() {
             //if we arrived here, we are sure that there is at least a tx inside the buffer
@@ -203,7 +199,6 @@ impl BloomScheduler {
                     }
                     if and_result == 1 {
                         bloom_threadset.insert(worker_index);
-                        // TODO: add switch between breaking on first conflict or collecting all
                         break 'main_loop;
                     }
                 }

@@ -64,10 +64,11 @@ pub enum NetworkType {
 #[serde(rename_all = "lowercase")]
 pub enum SchedulerType {
     Greedy,
-    PrioGraph,
     Bloom,
+    BloomCounter,
     Sequential,
     RoundRobin,
+    PrioGraph
 }
 
 // New struct to represent a snapshot with its directories
@@ -141,7 +142,6 @@ impl Config {
         network_type: NetworkType,
         scheduler_type: SchedulerType,
         simulate: bool,
-        // TODO: Convert to partial_config
         // CLI Overrides (passed from main)
         cli_num_txs: Option<u64>,
         cli_batch_size: Option<u64>,

@@ -5,8 +5,7 @@ use solana_svm::account_overrides::AccountOverrides;
 use thiserror::Error;
 use std::sync::Arc;
 use crate::harness::{executor::execution_tracker::ExecutionTracker};
-use crate::harness::scheduler::thread_aware_account_locks::ThreadAwareAccountLocks;
-use std::sync::Mutex;
+
 pub type WorkerId = usize;
 
 pub struct HarnessTransaction<Tx> {
