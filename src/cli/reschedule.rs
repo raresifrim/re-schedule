@@ -4,6 +4,7 @@ use crate::harness::issuer::thread_aware_issuer::ThreadAwareIssuer;
 use crate::harness::scheduler::bloom_counter_scheduler::BloomCounterScheduler;
 use crate::harness::scheduler::bloom_scheduler::BloomScheduler;
 use crate::harness::scheduler::greedy_scheduler::GreedyScheduler;
+use crate::harness::scheduler::priograph_scheduler::PrioGraphScheduler;
 use crate::harness::scheduler::round_robin_scheduler::RoundRobinScheduler;
 use crate::harness::scheduler::scheduler::HarnessTransaction;
 use crate::harness::scheduler::sequential_scheduler::SequentialScheduler;
@@ -81,22 +82,20 @@ pub struct RescheduleArgs {
     #[arg(long)]
     pub batch_size: Option<u64>,
 
-    /// Slot allowed time in ms
-    #[arg(long)]
-    pub slot_duration: Option<u64>,
-
     /// Number of thread workers
     #[arg(long, short = 'w')]
     pub num_workers: Option<u64>,
 
     /// Whether to simulate the tx execution following a Gaussian distribution model
     /// or to execute it directly via the SVM
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub simulate: bool,
 
     #[arg(long, default_value_t = false)]
     pub compute_bloom_fpr: bool,
 }
+
+const MAX_BATCH_SIZE: u64 = 128;
 
 #[tracing::instrument(name = "init", skip(args))]
 pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
@@ -108,7 +107,6 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         args.simulate,
         args.transactions,
         args.batch_size,
-        args.slot_duration,
         args.num_workers,
         args.compute_bloom_fpr
     )
@@ -134,13 +132,16 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
         args.simulate,
     )
     .unwrap();
+
+    assert!(config.batch_size <= MAX_BATCH_SIZE);
+
     info!(
         "Loaded {} execution transactions from local file",
         transactions.len()
     );
 
     info!("Initializing scheduler harness");
-    // TODO: Refactor
+
     let mut summary = match config.scheduler_type {
         SchedulerType::Bloom => {
             {
@@ -202,7 +203,6 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             let scheduler_harness = {
                 let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(config.num_workers as usize)));
                 let scheduler = GreedyScheduler::new(
-                    start_bank.clone(),
                     account_locks.clone(),
                     config.num_workers as usize,
                     config.batch_size as usize,
@@ -215,7 +215,19 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
             scheduler_harness.run()
         }
         SchedulerType::PrioGraph => {
-            unimplemented!()
+            let scheduler_harness = {
+                let account_locks =  Arc::new(Mutex::new(ThreadAwareAccountLocks::new(config.num_workers as usize)));
+                let scheduler = PrioGraphScheduler::new(
+                    account_locks.clone(),
+                    config.num_workers as usize,
+                    config.batch_size as usize,
+                    MAX_COMPUTE_UNIT_LIMIT as u64,
+                );
+                let issuer = ThreadAwareIssuer::new(account_locks.clone(), true);
+                SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?
+            };
+            info!("Initialized PrioGraph harness");
+            scheduler_harness.run()
         }
         SchedulerType::Sequential => {
             let scheduler_harness = {
@@ -359,7 +371,6 @@ fn load_runtime_transactions(
                 }
             }
         } else {
-            // TODO: Send an angry email, about the abuse of the `try_from` name.
             let runtime_tx = RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
                 SanitizedVersionedTransaction::try_from(tx)?,
                 solana_sdk::transaction::MessageHash::Precomputed(message_hash),

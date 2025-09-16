@@ -13,7 +13,6 @@ use crate::harness::scheduler::scheduler::WorkerId;
 use ahash::{HashMap, HashMapExt};
 use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
-use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::collections::VecDeque;
@@ -27,7 +26,6 @@ pub struct GreedyScheduler {
     num_workers: usize,
     batch_size: usize,
     target_scheduled_cus: u64,
-    bank: Arc<Bank>,
     working_account_set: ReadWriteAccountSet,
     unschedulables: VecDeque<HarnessTransaction<<GreedyScheduler as Scheduler>::Tx>>,
     scheduling_summary: SchedulingSummary,
@@ -39,7 +37,6 @@ pub struct GreedyScheduler {
 
 impl GreedyScheduler {
     pub fn new(
-        bank: Arc<Bank>,
         account_locks: Arc<Mutex<ThreadAwareAccountLocks>>,
         num_workers: usize,
         batch_size: usize,
@@ -67,7 +64,6 @@ impl GreedyScheduler {
         }
 
         Self {
-            bank,
             account_locks,
             num_workers,
             batch_size,

@@ -1,6 +1,7 @@
 use ahash::HashMap;
 use crossbeam_channel::{Receiver, Sender};
-use solana_runtime_transaction::transaction_with_meta::TransactionWithMeta;
+use solana_runtime_transaction::{runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta};
+use solana_sdk::transaction::{SanitizedTransaction, Transaction};
 use solana_svm::account_overrides::AccountOverrides;
 use thiserror::Error;
 use std::sync::Arc;
@@ -21,6 +22,19 @@ pub struct HarnessTransaction<Tx> {
     pub cu_cost: u64,
 }
 
+impl<Tx> HarnessTransaction<Tx> where Tx: TransactionWithMeta{
+    //create a memory block of size HarnessTransaction
+    pub fn new() -> *mut Self{
+        unsafe {
+            let layout = std::alloc::Layout::new::<HarnessTransaction<Tx>>();
+            let ptr = std::alloc::alloc(layout);
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            return ptr as *mut HarnessTransaction<Tx>
+        };
+    }
+}
 
 /// Message: [Issuer -> Scheduler]
 /// Message: [Scheduler -> Executor]

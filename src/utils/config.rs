@@ -18,7 +18,6 @@ pub struct JsonNetworkConfig {
     pub num_blocks: u64,
     pub num_txs: u64,
     pub batch_size: u64,
-    pub slot_duration: u64,
     pub num_workers: u64,
 }
 
@@ -127,7 +126,6 @@ pub struct Config {
     /// Execution configuration (can be overridden by CLI)
     pub num_txs_to_process: u64,
     pub batch_size: u64,
-    pub slot_duration: u64,
     pub num_workers: u64,
     pub num_report_locks: usize,
     pub simulate: bool,
@@ -145,7 +143,6 @@ impl Config {
         // CLI Overrides (passed from main)
         cli_num_txs: Option<u64>,
         cli_batch_size: Option<u64>,
-        cli_slot_duration: Option<u64>,
         cli_num_workers: Option<u64>,
         cli_compute_bloom_fpr: bool
     ) -> anyhow::Result<Self> {
@@ -186,9 +183,9 @@ impl Config {
         };
 
         let batch_size = cli_batch_size.unwrap_or(network_config.batch_size);
-        let slot_duration = cli_slot_duration.unwrap_or(network_config.slot_duration);
         let num_workers = cli_num_workers.unwrap_or(network_config.num_workers);
         let compute_bloom_fpr = cli_compute_bloom_fpr;
+
         Ok(Self {
             start_snapshot,
             network_type,
@@ -196,9 +193,7 @@ impl Config {
             scheduler_type,
             num_txs_to_process,
             batch_size,
-            slot_duration,
             num_workers,
-            // TODO: Overrides
             num_report_locks: 10,
             simulate,
             compute_bloom_fpr

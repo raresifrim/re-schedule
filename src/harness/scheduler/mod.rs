@@ -6,3 +6,4 @@ pub mod bloom_counter_scheduler;
 pub mod sequential_scheduler;
 pub mod greedy_scheduler;
 pub mod thread_aware_account_locks;
+pub mod priograph_scheduler;

@@ -297,7 +297,7 @@ impl Scheduler for BloomCounterScheduler {
                     match e {
                         crossbeam_channel::TryRecvError::Empty => {
                             if self.container.is_empty() {
-                                //info!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
+                                tracing::debug!("No txs on the channel and no txs buffered locally. Maybe we receive something later...")
                             }
                         }
                         crossbeam_channel::TryRecvError::Disconnected => {
