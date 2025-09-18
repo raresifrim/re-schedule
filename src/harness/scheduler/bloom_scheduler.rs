@@ -208,7 +208,6 @@ impl BloomScheduler {
                 next_worker = select_thread::<Self>(
                     schedulable_threads,
                     &self.thread_trackers,
-                    &self.work_lanes,
                     1,
                     harness_tx.cu_cost,
                 );
@@ -219,7 +218,6 @@ impl BloomScheduler {
                 next_worker = select_thread::<Self>(
                     bloom_threadset,
                     &self.thread_trackers,
-                    &self.work_lanes,
                     1,
                     harness_tx.cu_cost,
                 );
@@ -259,7 +257,6 @@ impl BloomScheduler {
                 }
             }
 
-            // TODO: Maybe bug
             self.r_query_results.clear();
             self.w_query_results.clear();
 
@@ -277,6 +274,8 @@ impl BloomScheduler {
                     entry: v,
                     total_cus: cu_cost,
                 });
+            
+            self.thread_trackers[next_worker].update(1, 0, cu_cost);
 
             let report = self
                 .scheduling_summary

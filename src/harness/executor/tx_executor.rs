@@ -221,7 +221,8 @@ where
                                     sig = ?tx.transaction.signature(),
                                     "Execute success",
                                 );
-                                self.tracker.update(1, tx_time, pt.executed_units());
+                                //tx number and cus are maintained directly by the schedulers
+                                self.tracker.update(0, tx_time, 0);
                                 if tx.retry {
                                     self.summary.retry_time_us += tx_time;
                                 } else {

@@ -8,14 +8,12 @@ use crate::harness::scheduler::thread_aware_account_locks::ThreadSet;
 use crate::harness::scheduler::thread_aware_account_locks::select_thread;
 use ahash::{HashMap, HashMapExt};
 use crossbeam_channel::{Receiver, Sender};
-use solana_runtime::bank::Bank;
 use solana_runtime_transaction::runtime_transaction::RuntimeTransaction;
 use solana_sdk::transaction::SanitizedTransaction;
 use std::sync::Arc;
 
 
 pub struct RoundRobinScheduler {
-    bank: Arc<Bank>,
     num_workers: usize,
     work_lanes: HashMap<WorkerId, Work<<RoundRobinScheduler as Scheduler>::Tx>>,
     target_cus: u64,
@@ -25,7 +23,7 @@ pub struct RoundRobinScheduler {
 }
 
 impl RoundRobinScheduler {
-    pub fn new(num_workers: usize, target_cus: u64, target_txs: usize, bank: Arc<Bank>) -> Self {
+    pub fn new(num_workers: usize, target_cus: u64, target_txs: usize) -> Self {
         let mut txs_per_worker = HashMap::with_capacity(num_workers);
         for i in 0..num_workers {
             txs_per_worker.insert(i, super::scheduler::WorkerSummary::default());
@@ -44,7 +42,6 @@ impl RoundRobinScheduler {
             target_cus,
             target_txs,
             work_lanes,
-            bank,
             scheduling_summary,
             //work trackers should be added through a separate function call defined by the Scheduler trait
             thread_trackers: vec![],
@@ -68,7 +65,7 @@ impl Scheduler for RoundRobinScheduler {
         loop {
             let mut can_send = false;
 
-            match issue_channel.try_recv() {
+            match issue_channel.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(work) => {
                     tracing::debug!("Received txs from TxIssuer");
 
@@ -77,7 +74,6 @@ impl Scheduler for RoundRobinScheduler {
                         let thread_id = select_thread::<Self>(
                             schedulable_threads,
                             &self.thread_trackers,
-                            &self.work_lanes,
                             1,
                             harness_tx.cu_cost,
                         );
@@ -96,7 +92,8 @@ impl Scheduler for RoundRobinScheduler {
                                 entry: v,
                                 total_cus: cu_cost,
                             });
-
+                        
+                        self.thread_trackers[thread_id].update(1, 0, cu_cost);
                         tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
 
                         self.scheduling_summary.total_txs += 1;
@@ -131,11 +128,10 @@ impl Scheduler for RoundRobinScheduler {
                 //error might be actualy just empty or a real error like disconnected
                 Err(e) => {
                     match e {
-                        crossbeam_channel::TryRecvError::Empty => {
-                            //if no more work is available, check if there is something to send right away to not waste execution time
+                        crossbeam_channel::RecvTimeoutError::Timeout => {
                             can_send = true;
                         }
-                        crossbeam_channel::TryRecvError::Disconnected => {
+                        crossbeam_channel::RecvTimeoutError::Disconnected => {
                             //if disconnected we exit as there is no tx issuer to give us work
                             return Err(SchedulerError::DisconnectedRecvChannel(String::from(
                                 "TxIssuer Channel is closed",
@@ -146,9 +142,11 @@ impl Scheduler for RoundRobinScheduler {
             }
 
             if can_send {
+                tracing::debug!("Current worker tracker: {:?}", self.thread_trackers);
                 for worker_index in 0..self.num_workers {
                     match self.work_lanes.remove_entry(&worker_index) {
                         Some(lane) => {
+                            tracing::debug!("Sending work to thread {}", lane.0);
                             match execution_channels[lane.0].send(lane.1) {
                                 Ok(_) => {}
                                 Err(_) => {

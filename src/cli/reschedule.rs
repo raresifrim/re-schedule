@@ -251,7 +251,6 @@ pub async fn run_schedule(args: RescheduleArgs) -> Result<()> {
                     config.num_workers as usize,
                     MAX_COMPUTE_UNIT_LIMIT as u64,
                     config.batch_size as usize,
-                    start_bank.clone(),
                 );
                 let issuer = BasicIssuer::new();
                 SchedulerHarness::new_from_config(config, scheduler, issuer, transactions, start_bank)?

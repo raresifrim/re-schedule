@@ -187,7 +187,6 @@ impl BloomCounterScheduler {
                 next_worker = select_thread::<Self>(
                     schedulable_threads,
                     &self.thread_trackers,
-                    &self.work_lanes,
                     1,
                     harness_tx.cu_cost,
                 );
@@ -240,6 +239,8 @@ impl BloomCounterScheduler {
                     entry: v,
                     total_cus: cu_cost,
                 });
+            
+            self.thread_trackers[next_worker].update(1, 0, cu_cost);
 
             let report = self
                 .scheduling_summary

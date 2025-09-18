@@ -132,7 +132,8 @@ impl GreedyScheduler {
                         f.total_cus += cu_cost;
                     })
                     .or_insert(Work { entry: v, total_cus: cu_cost });
-
+                    
+                    self.thread_trackers[thread_id].update(1, 0, cu_cost);
                     tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
                     
                     self.scheduling_summary.total_txs += 1;
@@ -205,7 +206,6 @@ impl GreedyScheduler {
                 select_thread::<Self>(
                     thread_set,
                     &self.thread_trackers,
-                    &self.work_lanes,
                     1,
                     harness_tx.cu_cost
                 )

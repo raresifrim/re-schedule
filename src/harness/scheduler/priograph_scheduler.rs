@@ -147,6 +147,7 @@ impl PrioGraphScheduler {
                                 total_cus: cu_cost,
                             });
 
+                        self.thread_trackers[thread_id].update(1, 0, cu_cost);
                         tracing::debug!("Added one more tx to the batch of worker {}", thread_id);
                         self.ids.push(id.id); //reserve this id as free for use when receiving new transactions
 
@@ -259,7 +260,6 @@ impl PrioGraphScheduler {
                 select_thread::<Self>(
                     thread_set,
                     &self.thread_trackers,
-                    &self.work_lanes,
                     1,
                     harness_tx.cu_cost,
                 )
@@ -324,7 +324,7 @@ impl Scheduler for PrioGraphScheduler {
                     .insert(id, self.unschedulables.pop().unwrap());
             }
 
-            if (self.ids.len() > 0) { //if we still have ids left to occupy
+            if self.ids.len() > 0 { //if we still have ids left to occupy
                 //quickly check if there are new incoming txs
                 match issue_channel.try_recv() {
                     Ok(work) => {

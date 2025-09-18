@@ -1,16 +1,16 @@
-use {
-    crate::harness::scheduler::scheduler::Work, ahash::AHashMap, solana_pubkey::Pubkey, std::{
-        collections::hash_map::Entry,
-        fmt::{Debug, Display},
-        ops::{BitAnd, BitAndAssign, Sub, BitOrAssign, BitOr},
-    }
-};
-use std::sync::Arc;
-use ahash::HashMap;
-use itertools::Itertools;
 use crate::harness::executor::execution_tracker::ExecutionTracker;
 use crate::harness::scheduler::scheduler::Scheduler;
-use crate::harness::scheduler::scheduler::WorkerId;
+use itertools::Itertools;
+use std::sync::Arc;
+use {
+    ahash::AHashMap,
+    solana_pubkey::Pubkey,
+    std::{
+        collections::hash_map::Entry,
+        fmt::{Debug, Display},
+        ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub},
+    },
+};
 
 pub const MAX_THREADS: usize = u64::BITS as usize;
 
@@ -20,12 +20,6 @@ pub type ThreadId = usize; // 0..MAX_THREADS-1
 /// A bit-set of threads an account is scheduled or can be scheduled for.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct ThreadSet(u64);
-
-#[derive(Debug)]
-pub struct AccountWriteLocks {
-    thread_id: ThreadId,
-    lock_count: u32,
-}
 
 #[derive(Debug)]
 pub struct ThreadLocks {
@@ -73,33 +67,27 @@ pub struct ThreadAwareAccountLocks {
 pub fn select_thread<S: Scheduler>(
     thread_set: ThreadSet,
     thread_trackers: &[Arc<ExecutionTracker>],
-    work_lanes: &HashMap<WorkerId, Work<S::Tx>>,
-    num_txs: usize, total_cus: u64,
+    num_txs: usize,
+    total_cus: u64,
 ) -> ThreadId {
-
     assert!(!thread_set.is_empty());
-    
-    thread_set
-    .contained_threads_iter()
-    .map(|thread_id|{
-        let (work_lane_txs, work_lane_cus) = match work_lanes.get(&thread_id){
-            Some(lane) => (lane.entry.len(), lane.total_cus),
-            None => (0,0)
-        };
-        (
-            thread_id,
-            //we don't know the execution time yet, so we use the current one
-            thread_trackers[thread_id].total_time_executed(),
-            num_txs + thread_trackers[thread_id].num_txs_executed() + work_lane_txs,
-            total_cus + thread_trackers[thread_id].total_cus() + work_lane_cus,
-        )
-    })
-    .min_by(|a, b| 
-        //compare by execution time first, then by num of txs, and last by CUs
-        a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)).then_with(|| a.3.cmp(&b.3))
-    ).map(|(thread_id, _, _, _)| thread_id)
-    .unwrap()
 
+    thread_set
+        .contained_threads_iter()
+        .map(|thread_id| {
+            (
+                thread_id,
+                //we don't know the execution time yet, so we use the current one
+                thread_trackers[thread_id].total_time_executed(),
+                thread_trackers[thread_id].num_txs_executed() + num_txs,
+                thread_trackers[thread_id].total_cus() + total_cus,
+            )
+        })
+        .min_by(|a, b|
+        //compare by execution time first, then by num of txs, and last by CUs
+        a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3)))
+        .map(|(thread_id, _, _, _)| thread_id)
+        .unwrap()
 }
 
 impl ThreadAwareAccountLocks {
@@ -131,10 +119,11 @@ impl ThreadAwareAccountLocks {
         allowed_threads: ThreadSet,
         thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
     ) -> Result<ThreadId, TryLockError> {
-        let schedulable_threads = match self.check_accounts(write_account_locks, read_account_locks, allowed_threads) {
-            Ok(s) => s,
-            Err(err) => return Err(err)
-        };
+        let schedulable_threads =
+            match self.check_accounts(write_account_locks, read_account_locks, allowed_threads) {
+                Ok(s) => s,
+                Err(err) => return Err(err),
+            };
 
         let thread_id = thread_selector(schedulable_threads);
         self.lock_accounts(write_account_locks, read_account_locks, thread_id);
@@ -154,7 +143,7 @@ impl ThreadAwareAccountLocks {
         if schedulable_threads.is_empty() {
             return Err(TryLockError::ThreadNotAllowed);
         }
-        
+
         Ok(schedulable_threads)
     }
 
@@ -199,16 +188,18 @@ impl ThreadAwareAccountLocks {
         Some(schedulable_threads)
     }
 
-
-     /// Returns `ThreadSet` that the given accounts are locked by.
+    /// Returns `ThreadSet` that the given accounts are locked by.
     pub fn account_conflicting_threads<'a>(
         &self,
         write_account_locks: &[&Pubkey],
         read_account_locks: &[&Pubkey],
     ) -> ThreadSet {
         let mut schedulable_threads = ThreadSet::none();
-       
-        for pair in write_account_locks.iter().zip_longest(read_account_locks.iter()) {
+
+        for pair in write_account_locks
+            .iter()
+            .zip_longest(read_account_locks.iter())
+        {
             match pair {
                 itertools::EitherOrBoth::Both(w, r) => {
                     let waw_hazard = self.write_locked_threads(w);
@@ -258,7 +249,7 @@ impl ThreadAwareAccountLocks {
 
     /// Returns `ThreadSet` of threads that hold locks on the writable account.
     fn write_locked_threads(&self, account: &Pubkey) -> ThreadSet {
-         match self.locks.get(account) {
+        match self.locks.get(account) {
             None => ThreadSet::none(),
             Some(AccountLocks {
                 write_locks: Some(write_locks),
@@ -298,7 +289,11 @@ impl ThreadAwareAccountLocks {
             Some(AccountLocks {
                 write_locks: Some(write_locks),
                 read_locks: None,
-            }) =>  write_locks.thread_set.only_one_contained().map(ThreadSet::only).unwrap_or_else(ThreadSet::none),
+            }) => write_locks
+                .thread_set
+                .only_one_contained()
+                .map(ThreadSet::only)
+                .unwrap_or_else(ThreadSet::none),
             Some(AccountLocks {
                 write_locks: Some(write_locks),
                 read_locks: Some(read_locks),
@@ -480,7 +475,6 @@ impl BitOrAssign for ThreadSet {
         self.0 |= rhs.0;
     }
 }
-
 
 impl Sub for ThreadSet {
     type Output = Self;
